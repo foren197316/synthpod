@@ -34,7 +34,7 @@
 #include <synthpod_app.h>
 #include <synthpod_private.h>
 
-#define NUM_FEATURES 11
+#define NUM_FEATURES 13
 #define MAX_SOURCES 32 // TODO how many?
 #define MAX_MODS 512 // TODO how many?
 
@@ -681,14 +681,6 @@ _sp_app_mod_add(sp_app_t *app, const char *uri, u_id_t uid)
 	mod->feature_list[nfeatures].URI = LV2_BUF_SIZE__boundedBlockLength;
 	mod->feature_list[nfeatures++].data = NULL;
 
-	/* TODO support
-	mod->feature_list[nfeatures].URI = LV2_BUF_SIZE__fixedBlockLength;
-	mod->feature_list[nfeatures++].data = NULL;
-	
-	mod->feature_list[nfeatures].URI = LV2_BUF_SIZE__powerOf2BlockLength;
-	mod->feature_list[nfeatures++].data = NULL;
-	*/
-
 	mod->feature_list[nfeatures].URI = LV2_OPTIONS__options;
 	mod->feature_list[nfeatures++].data = mod->opts.options;
 
@@ -723,6 +715,18 @@ _sp_app_mod_add(sp_app_t *app, const char *uri, u_id_t uid)
 	{
 		mod->feature_list[nfeatures].URI = OSC__schedule;
 		mod->feature_list[nfeatures++].data = app->driver->osc_sched;
+	}
+
+	if(app->driver->features & SP_APP_FEATURE_FIXED_BLOCK_LENGTH)
+	{
+		mod->feature_list[nfeatures].URI = LV2_BUF_SIZE__fixedBlockLength;
+		mod->feature_list[nfeatures++].data = NULL;
+	}
+
+	if(app->driver->features & SP_APP_FEATURE_POWER_OF_2_BLOCK_LENGTH)
+	{
+		mod->feature_list[nfeatures].URI = LV2_BUF_SIZE__powerOf2BlockLength;
+		mod->feature_list[nfeatures++].data = NULL;
 	}
 
 	assert(nfeatures <= NUM_FEATURES);
@@ -814,6 +818,8 @@ _sp_app_mod_add(sp_app_t *app, const char *uri, u_id_t uid)
 				tar->sys.type = SYSTEM_PORT_MIDI;
 			else if(lilv_port_is_a(plug, port, app->regs.synthpod.osc_port.node))
 				tar->sys.type = SYSTEM_PORT_OSC;
+			else if(lilv_port_is_a(plug, port, app->regs.synthpod.com_port.node))
+				tar->sys.type = SYSTEM_PORT_COM;
 			else
 				tar->sys.type = SYSTEM_PORT_NONE;
 
@@ -3497,4 +3503,17 @@ sp_app_nominal_block_length(sp_app_t *app, uint32_t nsamples)
 	}
 
 	return 0;
+}
+
+// rt
+int
+sp_app_com_event(sp_app_t *app, LV2_URID id)
+{
+	return id == app->regs.synthpod.com_event.urid ? 1 : 0;
+}
+
+int
+sp_app_transfer_event(sp_app_t *app, LV2_URID id)
+{
+	return id == app->regs.synthpod.transfer_event.urid ? 1 : 0;
 }

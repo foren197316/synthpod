@@ -33,6 +33,7 @@
 #include <synthpod_common.h>
 #include <lv2_osc.h>
 
+typedef enum _sp_app_features_t sp_app_features_t;
 typedef enum _system_port_t system_port_t;
 
 typedef struct _sp_app_t sp_app_t;
@@ -50,13 +51,19 @@ typedef void *(*sp_system_port_add)(void *data, system_port_t type,
 	const char *short_name, const char *pretty_name, int input);
 typedef void (*sp_system_port_del)(void *data, void *sys_port);
 
+enum _sp_app_features_t {
+	SP_APP_FEATURE_FIXED_BLOCK_LENGTH				= (1 << 0),
+	SP_APP_FEATURE_POWER_OF_2_BLOCK_LENGTH	= (1 << 1)
+};
+
 enum _system_port_t {
 	SYSTEM_PORT_NONE = 0,
 	SYSTEM_PORT_CONTROL,
 	SYSTEM_PORT_AUDIO,
 	SYSTEM_PORT_CV,
 	SYSTEM_PORT_MIDI,
-	SYSTEM_PORT_OSC
+	SYSTEM_PORT_OSC,
+	SYSTEM_PORT_COM
 };
 
 struct _sp_app_system_source_t {
@@ -101,6 +108,8 @@ struct _sp_app_driver_t {
 
 	// clock_sync
 	osc_schedule_t *osc_sched;
+
+	sp_app_features_t features;
 };
 
 SYNTHPOD_SYMBOL_EXTERN sp_app_t *
@@ -152,5 +161,11 @@ sp_app_options_set(sp_app_t *app, const LV2_Options_Option *options);
 
 SYNTHPOD_SYMBOL_EXTERN int
 sp_app_nominal_block_length(sp_app_t *app, uint32_t nsamples);
+
+SYNTHPOD_SYMBOL_EXTERN int
+sp_app_com_event(sp_app_t *app, LV2_URID id); 
+
+SYNTHPOD_SYMBOL_EXTERN int
+sp_app_transfer_event(sp_app_t *app, LV2_URID id); 
 
 #endif // _SYNTHPOD_APP_H

@@ -75,6 +75,7 @@ struct _plughandle_t {
 
 	struct {
 		LV2_Atom_Forge event_out;
+		LV2_Atom_Forge com_in;
 		LV2_Atom_Forge notify;
 		LV2_Atom_Forge work;
 	} forge;
@@ -97,12 +98,14 @@ struct _plughandle_t {
 		LV2_Atom_Sequence *event_in;
 		float *audio_in[2];
 		float *input[4];
+		LV2_Atom_Sequence *com_in;
 	} source;
 
 	struct {
 		const LV2_Atom_Sequence *event_out;
 		const float *audio_out[2];
 		const float *output[4];
+		const LV2_Atom_Sequence *com_out;
 	} sink;
 
 	// non-rt worker-thread
@@ -412,6 +415,7 @@ instantiate(const LV2_Descriptor* descriptor, double rate,
 	handle->driver.system_port_add = NULL;
 	handle->driver.system_port_del = NULL;
 	handle->driver.osc_sched = NULL;
+	handle->driver.features = 0;
 
 	const LilvWorld *world = NULL;
 
@@ -432,6 +436,10 @@ instantiate(const LV2_Descriptor* descriptor, double rate,
 			handle->zero_sched = (Zero_Worker_Schedule *)features[i]->data;
 		else if(!strcmp(features[i]->URI, OSC__schedule))
 			handle->driver.osc_sched = (osc_schedule_t *)features[i]->data;
+		else if(!strcmp(features[i]->URI, LV2_BUF_SIZE__fixedBlockLength))
+			handle->driver.features |= SP_APP_FEATURE_FIXED_BLOCK_LENGTH;
+		else if(!strcmp(features[i]->URI, LV2_BUF_SIZE__powerOf2BlockLength))
+			handle->driver.features |= SP_APP_FEATURE_POWER_OF_2_BLOCK_LENGTH;
 
 	if(!handle->driver.map)
 	{
@@ -520,6 +528,7 @@ instantiate(const LV2_Descriptor* descriptor, double rate,
 	}
 
 	lv2_atom_forge_init(&handle->forge.event_out, handle->driver.map);
+	lv2_atom_forge_init(&handle->forge.com_in, handle->driver.map);
 	lv2_atom_forge_init(&handle->forge.notify, handle->driver.map);
 
 	return handle;
@@ -634,6 +643,9 @@ run(LV2_Handle instance, uint32_t nsamples)
 			case SYSTEM_PORT_CONTROL:
 				handle->source.input[control_ptr++] = source->buf;
 				break;
+			case SYSTEM_PORT_COM:
+				handle->source.com_in = source->buf;
+				break;
 
 			case SYSTEM_PORT_CV:
 			case SYSTEM_PORT_OSC:
@@ -642,7 +654,7 @@ run(LV2_Handle instance, uint32_t nsamples)
 		}
 	}
 
-	assert(handle->source.event_in
+	assert(handle->source.event_in && handle->source.com_in
 		&& handle->source.audio_in[0] && handle->source.audio_in[1]
 		&& handle->source.input[0] && handle->source.input[1]
 		&& handle->source.input[2] && handle->source.input[3]);
@@ -668,6 +680,7 @@ run(LV2_Handle instance, uint32_t nsamples)
 
 	struct {
 		LV2_Atom_Forge_Frame event_out;
+		LV2_Atom_Forge_Frame com_in;
 		LV2_Atom_Forge_Frame notify;
 	} frame;
 
@@ -675,6 +688,10 @@ run(LV2_Handle instance, uint32_t nsamples)
 	lv2_atom_forge_set_buffer(&handle->forge.event_out,
 		(uint8_t *)handle->port.event_out, handle->port.event_out->atom.size);
 	lv2_atom_forge_sequence_head(&handle->forge.event_out, &frame.event_out, 0);
+	
+	lv2_atom_forge_set_buffer(&handle->forge.com_in,
+		(uint8_t *)handle->source.com_in, SEQ_SIZE);
+	lv2_atom_forge_sequence_head(&handle->forge.com_in, &frame.com_in, 0);
 	
 	lv2_atom_forge_set_buffer(&handle->forge.notify,
 		(uint8_t *)handle->port.notify, handle->port.notify->atom.size);
@@ -715,9 +732,18 @@ run(LV2_Handle instance, uint32_t nsamples)
 
 			if(atom->type == handle->forge.notify.Object)
 			{
-				if(obj->body.id == handle->uri.synthpod.event)
+				// copy com events to com buffer 
+				if(sp_app_com_event(handle->app, obj->body.id))
 				{
-					//printf("control: %u\n", atom->size);
+					uint32_t size = obj->atom.size + sizeof(LV2_Atom);
+					lv2_atom_forge_frame_time(&handle->forge.com_in, ev->time.frames);
+					lv2_atom_forge_raw(&handle->forge.com_in, obj, size);
+					lv2_atom_forge_pad(&handle->forge.com_in, size);
+
+					sp_app_from_ui(app, atom);
+				}
+				else if (sp_app_transfer_event(handle->app, obj->body.id))
+				{
 					sp_app_from_ui(app, atom);
 				}
 				else if(obj->body.otype == handle->uri.patch.set)
@@ -727,6 +753,9 @@ run(LV2_Handle instance, uint32_t nsamples)
 				}
 			}
 		}
+
+		// finalize com buffer
+		lv2_atom_forge_pop(&handle->forge.com_in, &frame.com_in);
 		
 		// run app post
 		sp_app_run_post(app, nsamples);
@@ -764,6 +793,9 @@ run(LV2_Handle instance, uint32_t nsamples)
 			case SYSTEM_PORT_CONTROL:
 				handle->sink.output[control_ptr++] = sink->buf;
 				break;
+			case SYSTEM_PORT_COM:
+				handle->sink.com_out = sink->buf;
+				break;
 
 			case SYSTEM_PORT_CV:
 			case SYSTEM_PORT_OSC:
@@ -772,7 +804,7 @@ run(LV2_Handle instance, uint32_t nsamples)
 		}
 	}
 
-	assert(handle->sink.event_out
+	assert(handle->sink.event_out && handle->sink.com_out
 		&& handle->sink.audio_out[0] && handle->sink.audio_out[1]
 		&& handle->sink.output[0] && handle->sink.output[1]
 		&& handle->sink.output[2] && handle->sink.output[3]);
@@ -784,6 +816,14 @@ run(LV2_Handle instance, uint32_t nsamples)
 	*handle->port.output[1] = *handle->sink.output[1];
 	*handle->port.output[2] = *handle->sink.output[2];
 	*handle->port.output[3] = *handle->sink.output[3];
+
+	LV2_ATOM_SEQUENCE_FOREACH(handle->sink.com_out, ev)
+	{
+		const LV2_Atom *atom = &ev->body;
+
+		sp_app_from_ui(handle->app, atom);
+		//FIXME is this the right place?
+	}
 }
 
 static void

@@ -1,18 +1,18 @@
 /*
  * Copyright (c) 2015 Hanspeter Portner (dev@open-music-kontrollers.ch)
  *
- * This is free software: you can redistribute it and/or modify
- * it under the terms of the Artistic License 2.0 as published by
- * The Perl Foundation.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
  *
- * This source is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * Artistic License 2.0 for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * You should have received a copy of the Artistic License 2.0
- * along the source as a COPYING file. If not, obtain it from
- * http://www.perlfoundation.org/artistic_license_2_0.
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses.
  */
 
 #include <stdio.h>
@@ -155,7 +155,7 @@ _rt_thread(void *data, Eina_Thread thread)
 	int play_num;
 	int capt_num;
 
-	const uint64_t nanos_per_period = nsamples * NANO_SECONDS / handle->srate;
+	const uint64_t nanos_per_period = (uint64_t)nsamples * NANO_SECONDS / handle->srate;
 	handle->cycle.cur_frames = 0; // initialize frame counter
 	_ntp_now(&handle->nxt_ntp);
 
@@ -180,9 +180,9 @@ _rt_thread(void *data, Eina_Thread thread)
 		_ntp_add_nanos(&nxt_ntp, nanos_per_period);
 		double diff = _ntp_diff(&handle->cur_ntp, &nxt_ntp);
 
-		/// calculate apparent samples per period
+		// calculate apparent samples per period
 		handle->cycle.dT = nsamples / diff;
-		handle->cycle.dTm1 = diff / nsamples;
+		handle->cycle.dTm1 = 1.0 / handle->cycle.dT;
 
 		for( ; na >= nsamples;
 				na -= nsamples,
@@ -205,7 +205,7 @@ _rt_thread(void *data, Eina_Thread thread)
 				pcmi_capt_init(pcmi, nsamples);
 			capt_num = 0;
 			for(const sp_app_system_source_t *source=sources;
-				(source->type != SYSTEM_PORT_NONE) && (capt_num < ncapt);
+				source->type != SYSTEM_PORT_NONE;
 				source++)
 			{
 				chan_t *chan = source->sys_port;
@@ -221,7 +221,8 @@ _rt_thread(void *data, Eina_Thread thread)
 					case SYSTEM_PORT_AUDIO:
 					{
 
-						pcmi_capt_chan(pcmi, capt_num++, source->buf, nsamples);
+						if(capt_num < ncapt)
+							pcmi_capt_chan(pcmi, capt_num++, source->buf, nsamples);
 
 						break;
 					}
@@ -234,6 +235,31 @@ _rt_thread(void *data, Eina_Thread thread)
 						LV2_Atom_Forge *forge = &chan->midi.forge;
 						lv2_atom_forge_set_buffer(forge, seq_in, SEQ_SIZE);
 						lv2_atom_forge_sequence_head(forge, &chan->midi.frame, 0);
+
+						break;
+					}
+
+					case SYSTEM_PORT_COM:
+					{
+						void *seq_in = source->buf;
+
+						LV2_Atom_Forge *forge = &handle->forge;
+						LV2_Atom_Forge_Frame frame;
+						lv2_atom_forge_set_buffer(forge, seq_in, SEQ_SIZE);
+						lv2_atom_forge_sequence_head(forge, &frame, 0);
+
+						const LV2_Atom_Object *obj;
+						size_t size;
+						while((obj = varchunk_read_request(bin->app_from_com, &size)))
+						{
+							lv2_atom_forge_frame_time(forge, 0);
+							lv2_atom_forge_raw(forge, obj, size);
+							lv2_atom_forge_pad(forge, size);
+
+							varchunk_read_advance(bin->app_from_com);
+						}
+
+						lv2_atom_forge_pop(forge, &frame);
 
 						break;
 					}
@@ -301,7 +327,7 @@ _rt_thread(void *data, Eina_Thread thread)
 			}
 						
 			for(const sp_app_system_source_t *source=sources;
-				(source->type != SYSTEM_PORT_NONE) && (capt_num < ncapt);
+				source->type != SYSTEM_PORT_NONE;
 				source++)
 			{
 				chan_t *chan = source->sys_port;
@@ -324,7 +350,7 @@ _rt_thread(void *data, Eina_Thread thread)
 				pcmi_play_init(pcmi, nsamples);
 			play_num = 0;
 			for(const sp_app_system_sink_t *sink=sinks;
-				(sink->type != SYSTEM_PORT_NONE) && (play_num < nplay);
+				sink->type != SYSTEM_PORT_NONE;
 				sink++)
 			{
 				chan_t *chan = sink->sys_port;
@@ -340,7 +366,8 @@ _rt_thread(void *data, Eina_Thread thread)
 					case SYSTEM_PORT_AUDIO:
 					{
 
-						pcmi_play_chan(pcmi, play_num++, sink->buf, nsamples);
+						if(play_num < nplay)
+							pcmi_play_chan(pcmi, play_num++, sink->buf, nsamples);
 
 						break;
 					}
@@ -376,6 +403,20 @@ _rt_thread(void *data, Eina_Thread thread)
 							snd_seq_event_output(handle->seq, &sev);
 						}
 
+						break;
+					}
+
+					case SYSTEM_PORT_COM:
+					{
+						const LV2_Atom_Sequence *seq_out = sink->buf;
+
+						LV2_ATOM_SEQUENCE_FOREACH(seq_out, ev)
+						{
+							const LV2_Atom *atom = &ev->body;
+							
+							sp_app_from_ui(bin->app, atom);
+							//FIXME is this the right place?
+						}
 						break;
 					}
 				}
@@ -468,6 +509,11 @@ _system_port_add(void *data, system_port_t type, const char *short_name,
 			break;
 		}
 		case SYSTEM_PORT_OSC:
+		{
+			// unsupported, skip
+			break;
+		}
+		case SYSTEM_PORT_COM:
 		{
 			// unsupported, skip
 			break;
@@ -660,7 +706,7 @@ _osc_schedule_osc2frames(osc_schedule_handle_t instance, uint64_t timestamp)
 		- handle->cycle.cur_frames
 		+ diff * handle->cycle.dT;
 
-	int64_t frames = round(frames_d);
+	int64_t frames = ceil(frames_d);
 
 	return frames;
 }
@@ -772,7 +818,7 @@ elm_main(int argc, char **argv)
 	fprintf(stderr,
 		"Synthpod "SYNTHPOD_VERSION"\n"
 		"Copyright (c) 2015 Hanspeter Portner (dev@open-music-kontrollers.ch)\n"
-		"Released under Artistic License 2.0 by Open Music Kontrollers\n");
+		"Released under GNU General Public License 3 by Open Music Kontrollers\n");
 
 	// read local configuration if present
 	Efreet_Ini *ini = _read_config(&handle);
@@ -785,18 +831,18 @@ elm_main(int argc, char **argv)
 			case 'v':
 				fprintf(stderr,
 					"--------------------------------------------------------------------\n"
-					"This is free software: you can redistribute it and/or modify\n"
-					"it under the terms of the Artistic License 2.0 as published by\n"
-					"The Perl Foundation.\n"
+					"This program is free software; you can redistribute it and/or modify\n"
+					"it under the terms of the GNU General Public License as published by\n"
+					"the Free Software Foundation; either version 3 of the License, or\n"
+					"(at your option) any later version.\n"
 					"\n"
-					"This source is distributed in the hope that it will be useful,\n"
+					"This program is distributed in the hope that it will be useful,\n"
 					"but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
-					"MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the\n"
-					"Artistic License 2.0 for more details.\n"
+					"MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n"
+					"GNU General Public License for more details.\n"
 					"\n"
-					"You should have received a copy of the Artistic License 2.0\n"
-					"along the source as a COPYING file. If not, obtain it from\n"
-					"http://www.perlfoundation.org/artistic_license_2_0.\n\n");
+					"You should have received a copy of the GNU General Public License\n"
+					"along with this program.  If not, see http://www.gnu.org/licenses.\n\n");
 				return 0;
 			case 'h':
 				fprintf(stderr,
@@ -890,6 +936,9 @@ elm_main(int argc, char **argv)
 	handle.osc_sched.frames2osc = _osc_schedule_frames2osc;
 	handle.osc_sched.handle = &handle;
 	bin->app_driver.osc_sched = &handle.osc_sched;
+	bin->app_driver.features = SP_APP_FEATURE_FIXED_BLOCK_LENGTH; // always true for ALSA
+  if(handle.frsize && !(handle.frsize & (handle.frsize - 1))) // check for powerOf2
+		bin->app_driver.features |= SP_APP_FEATURE_POWER_OF_2_BLOCK_LENGTH;
 
 	bin->ui_driver.saved = _ui_saved;
 

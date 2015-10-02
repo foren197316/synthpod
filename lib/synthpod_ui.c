@@ -265,7 +265,7 @@ struct _sp_ui_t {
 	LV2_Atom_Forge forge;
 
 	Evas_Object *win;
-	Evas_Object *table;
+	Evas_Object *vbox;
 	Evas_Object *popup;
 	Evas_Object *mainmenu;
 	Evas_Object *statusline;
@@ -2880,7 +2880,7 @@ _property_string_activated(void *data, Evas_Object *obj, void *event_info)
 				&ui->forge, trans, mod->uid, index, strsize,
 				mod->subject, prop->tar_urid, prop->type_urid);
 			if(atom)
-				strncpy(LV2_ATOM_BODY(atom), entered, strsize-1);
+				strcpy(LV2_ATOM_BODY(atom), entered);
 			_sp_ui_to_app_advance(ui, len);
 		}
 	}
@@ -3990,25 +3990,6 @@ _patchgrid_content_get(void *data, Evas_Object *obj, const char *part)
 }
 
 static void
-_theme_resize(void *data, Evas *e, Evas_Object *obj, void *event_info)
-{
-	sp_ui_t *ui = data;
-
-	Evas_Coord w, h;
-	evas_object_geometry_get(obj, NULL, NULL, &w, &h);
-
-	if(ui->table)
-		evas_object_resize(ui->table, w, h);
-}
-
-static void
-_theme_key_down(void *data, Evas *e, Evas_Object *obj, void *event_info)
-{
-	//printf("_theme_key_down: %s\n", ev->key);
-	//FIXME new/open/save/exit callbacks
-}
-
-static void
 _pluglist_populate(sp_ui_t *ui, const char *match)
 {
 	if(!ui || !ui->plugs || !ui->pluglist || !ui->plugitc)
@@ -4163,6 +4144,73 @@ _menu_about(void *data, Evas_Object *obj, void *event_info)
 		evas_object_show(ui->popup);
 }
 
+static void
+_theme_resize(void *data, Evas *e, Evas_Object *obj, void *event_info)
+{
+	sp_ui_t *ui = data;
+
+	Evas_Coord w, h;
+	evas_object_geometry_get(obj, NULL, NULL, &w, &h);
+
+	if(ui->vbox)
+		evas_object_resize(ui->vbox, w, h);
+}
+
+static void
+_theme_key_down(void *data, Evas *e, Evas_Object *obj, void *event_info)
+{
+	sp_ui_t *ui = data;
+	const Evas_Event_Key_Down *ev = event_info;
+
+	const Eina_Bool cntrl = evas_key_modifier_is_set(ev->modifiers, "Control");
+	const Eina_Bool shift = evas_key_modifier_is_set(ev->modifiers, "Shift");
+	
+	//printf("_theme_key_down: %s %i %i\n", ev->key, cntrl, shift);
+
+	if(cntrl)
+	{
+		if(!strcmp(ev->key, "n")
+			&& (ui->driver->features & SP_UI_FEATURE_NEW) )
+		{
+			_menu_new(ui, NULL, NULL);
+		}
+		else if(!strcmp(ev->key, "o")
+			&& (ui->driver->features & SP_UI_FEATURE_OPEN) )
+		{
+			evas_object_smart_callback_call(ui->load_but, "clicked", NULL);
+		}
+		else if(!strcmp(ev->key, "i")
+			&& (ui->driver->features & SP_UI_FEATURE_IMPORT_FROM) )
+		{
+			evas_object_smart_callback_call(ui->load_but, "clicked", NULL);
+		}
+		else if(!strcmp(ev->key, "s")
+			&& (ui->driver->features & SP_UI_FEATURE_SAVE) )
+		{
+			_menu_save(ui, NULL, NULL);
+		}
+		else if(!strcmp(ev->key, "S")
+			&& (ui->driver->features & SP_UI_FEATURE_SAVE_AS) )
+		{
+			evas_object_smart_callback_call(ui->save_as_but, "clicked", NULL);
+		}
+		else if(!strcmp(ev->key, "e")
+			&& (ui->driver->features & SP_UI_FEATURE_EXPORT_TO) )
+		{
+			evas_object_smart_callback_call(ui->save_as_but, "clicked", NULL);
+		}
+		else if(!strcmp(ev->key, "q")
+			&& (ui->driver->features & SP_UI_FEATURE_CLOSE) )
+		{
+			_menu_close(ui, NULL, NULL);
+		}
+		else if(!strcmp(ev->key, "h"))
+		{
+			_menu_about(ui, NULL, NULL);
+		}
+	}
+}
+
 sp_ui_t *
 sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 	void *data, int show_splash)
@@ -4314,17 +4362,17 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 			ui->griditc->func.del = _modgrid_del;
 		}
 
-		ui->table = elm_table_add(ui->win);
-		if(ui->table)
+		ui->vbox = elm_box_add(ui->win);
+		if(ui->vbox)
 		{
-			elm_table_homogeneous_set(ui->table, EINA_FALSE);
-			elm_table_padding_set(ui->table, 0, 0);
-			evas_object_size_hint_weight_set(ui->table, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
-			evas_object_size_hint_align_set(ui->table, EVAS_HINT_FILL, EVAS_HINT_FILL);
-			evas_object_show(ui->table);
+			elm_box_homogeneous_set(ui->vbox, EINA_FALSE);
+			elm_box_padding_set(ui->vbox, 0, 0);
+			evas_object_size_hint_weight_set(ui->vbox, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
+			evas_object_size_hint_align_set(ui->vbox, EVAS_HINT_FILL, EVAS_HINT_FILL);
+			evas_object_show(ui->vbox);
 
 			// get theme data items
-			Evas_Object *theme = elm_layout_add(ui->table);
+			Evas_Object *theme = elm_layout_add(ui->vbox);
 			if(theme)
 			{
 				elm_layout_file_set(theme, SYNTHPOD_DATA_DIR"/synthpod.edj",
@@ -4344,23 +4392,51 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 			evas_object_event_callback_add(ui->win, EVAS_CALLBACK_RESIZE, _theme_resize, ui);
 			evas_object_event_callback_add(ui->win, EVAS_CALLBACK_KEY_DOWN, _theme_key_down, ui);
 
-			ui->mainmenu = elm_box_add(ui->table);
+			const Eina_Bool exclusive = EINA_FALSE;
+			const Evas_Modifier_Mask ctrl_mask = evas_key_modifier_mask_get(
+				evas_object_evas_get(ui->win), "Control");
+			const Evas_Modifier_Mask shift_mask = evas_key_modifier_mask_get(
+				evas_object_evas_get(ui->win), "Shift");
+			// new
+			if(!evas_object_key_grab(ui->win, "n", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'n' key\n");
+			// open
+			if(!evas_object_key_grab(ui->win, "o", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'o' key\n");
+			// save and save-as
+			if(!evas_object_key_grab(ui->win, "s", ctrl_mask | shift_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 's' key\n");
+			// import
+			if(!evas_object_key_grab(ui->win, "i", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'i' key\n");
+			// export
+			if(!evas_object_key_grab(ui->win, "e", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'e' key\n");
+			// quit
+			if(!evas_object_key_grab(ui->win, "q", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'q' key\n");
+			// about
+			if(!evas_object_key_grab(ui->win, "h", ctrl_mask, 0, exclusive))
+				fprintf(stderr, "could not grab 'h' key\n");
+
+			ui->mainmenu = elm_box_add(ui->vbox);
 			if(ui->mainmenu)
 			{
 				Evas_Object *but;
 
 				elm_box_horizontal_set(ui->mainmenu, EINA_TRUE);
-				elm_box_homogeneous_set(ui->mainmenu, EINA_FALSE);
+				elm_box_homogeneous_set(ui->mainmenu, EINA_TRUE);
 				evas_object_size_hint_weight_set(ui->mainmenu, EVAS_HINT_EXPAND, 0.f);
 				evas_object_size_hint_align_set(ui->mainmenu, 0.f, 0.f);
 				evas_object_show(ui->mainmenu);
-				elm_table_pack(ui->table, ui->mainmenu, 0, 0, 1, 1);
+				elm_box_pack_end(ui->vbox, ui->mainmenu);
 			
 				if(ui->driver->features & SP_UI_FEATURE_NEW)
 				{
 					but = elm_button_add(ui->mainmenu);
 					if(but)
 					{
+						evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
 						elm_object_tooltip_text_set(but, "Ctrl+N");
 #if defined(ELM_1_10)
 						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
@@ -4386,16 +4462,22 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 					but = elm_fileselector_button_add(ui->mainmenu);
 					if(but)
 					{
-						elm_object_tooltip_text_set(but, "Ctrl+O");
-#if defined(ELM_1_10)
-						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
-#endif
+						evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
 						elm_fileselector_is_save_set(but, EINA_FALSE);
 						elm_fileselector_folder_only_set(but, EINA_TRUE);
 						if(ui->driver->features & SP_UI_FEATURE_OPEN)
+						{
 							elm_object_text_set(but, "Open");
+							elm_object_tooltip_text_set(but, "Ctrl+O");
+						}
 						else if(ui->driver->features & SP_UI_FEATURE_IMPORT_FROM)
+						{
 							elm_object_text_set(but, "Import");
+							elm_object_tooltip_text_set(but, "Ctrl+I");
+						}
+#if defined(ELM_1_10)
+						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
+#endif
 						evas_object_smart_callback_add(but, "file,chosen", _menu_open, ui);
 						evas_object_show(but);
 						elm_box_pack_end(ui->mainmenu, but);
@@ -4421,6 +4503,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 					but = elm_button_add(ui->mainmenu);
 					if(but)
 					{
+						evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
 						elm_object_tooltip_text_set(but, "Ctrl+S");
 #if defined(ELM_1_10)
 						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
@@ -4446,16 +4529,22 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 					but = elm_fileselector_button_add(ui->mainmenu);
 					if(but)
 					{
-						elm_object_tooltip_text_set(but, "Ctrl+Shift+S");
-#if defined(ELM_1_10)
-						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
-#endif
+						evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
 						elm_fileselector_is_save_set(but, EINA_TRUE);
 						elm_fileselector_folder_only_set(but, EINA_TRUE);
 						if(ui->driver->features & SP_UI_FEATURE_SAVE_AS)
+						{
 							elm_object_text_set(but, "Save as");
+							elm_object_tooltip_text_set(but, "Ctrl+Shift+S");
+						}
 						else if(ui->driver->features & SP_UI_FEATURE_EXPORT_TO)
+						{
 							elm_object_text_set(but, "Export");
+							elm_object_tooltip_text_set(but, "Ctrl+E");
+						}
+#if defined(ELM_1_10)
+						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
+#endif
 						evas_object_smart_callback_add(but, "file,chosen", _menu_save_as, ui);
 						evas_object_show(but);
 						elm_box_pack_end(ui->mainmenu, but);
@@ -4481,6 +4570,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 					but = elm_button_add(ui->mainmenu);
 					if(but)
 					{
+						evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
 						elm_object_tooltip_text_set(but, "Ctrl+Q");
 #if defined(ELM_1_10)
 						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
@@ -4504,9 +4594,10 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 				but = elm_button_add(ui->mainmenu);
 				if(but)
 				{
-						elm_object_tooltip_text_set(but, "Ctrl+?");
+					evas_object_size_hint_align_set(but, EVAS_HINT_FILL, EVAS_HINT_FILL);
+					elm_object_tooltip_text_set(but, "Ctrl+H");
 #if defined(ELM_1_10)
-						elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
+					elm_object_tooltip_orient_set(but, ELM_TOOLTIP_ORIENT_BOTTOM);
 #endif
 					elm_object_text_set(but, "About");
 					evas_object_smart_callback_add(but, "clicked", _menu_about, ui);
@@ -4524,7 +4615,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 				}
 			} // mainmenu
 
-			ui->mainpane = elm_panes_add(ui->table);
+			ui->mainpane = elm_panes_add(ui->vbox);
 			if(ui->mainpane)
 			{
 				elm_panes_horizontal_set(ui->mainpane, EINA_FALSE);
@@ -4532,9 +4623,9 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 				evas_object_size_hint_weight_set(ui->mainpane, EVAS_HINT_EXPAND, EVAS_HINT_EXPAND);
 				evas_object_size_hint_align_set(ui->mainpane, EVAS_HINT_FILL, EVAS_HINT_FILL);
 				evas_object_show(ui->mainpane);
-				elm_table_pack(ui->table, ui->mainpane, 0, 1, 1, 1);
+				elm_box_pack_end(ui->vbox, ui->mainpane);
 
-				ui->popup = elm_popup_add(ui->table);
+				ui->popup = elm_popup_add(ui->vbox);
 				if(ui->popup)
 				{
 					elm_popup_allow_events_set(ui->popup, EINA_TRUE);
@@ -4671,6 +4762,10 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 								elm_gengrid_item_append(ui->patchgrid, ui->patchitc,
 									&ui->matrix[t], NULL, NULL);
 							}
+
+							// scroll to first item
+							elm_gengrid_item_show(elm_gengrid_nth_item_get(ui->patchgrid, 0),
+								ELM_GENGRID_ITEM_SCROLLTO_NONE);
 						} // patchgrid
 					} // plugpane
 
@@ -4715,7 +4810,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 				} // modgrid
 			} // mainpane
 			
-			ui->statusline = elm_label_add(ui->table);
+			ui->statusline = elm_label_add(ui->vbox);
 			if(ui->statusline)
 			{
 				//TODO use
@@ -4723,7 +4818,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 				evas_object_size_hint_weight_set(ui->statusline, EVAS_HINT_EXPAND, 0.f);
 				evas_object_size_hint_align_set(ui->statusline, 0.f, 1.f);
 				evas_object_show(ui->statusline);
-				elm_table_pack(ui->table, ui->statusline, 0, 2, 1, 1);
+				elm_box_pack_end(ui->vbox, ui->statusline);
 			} // statusline
 		} // theme
 	}
@@ -4743,7 +4838,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 Evas_Object *
 sp_ui_widget_get(sp_ui_t *ui)
 {
-	return ui->table;
+	return ui->vbox;
 }
 
 static inline mod_t *
@@ -4782,7 +4877,7 @@ sp_ui_from_app(sp_ui_t *ui, const LV2_Atom *atom)
 
 	atom = ASSUME_ALIGNED(atom);
 	const transmit_t *transmit = (const transmit_t *)atom;
-	LV2_URID protocol = transmit->prop.key;
+	LV2_URID protocol = transmit->obj.body.otype;
 
 	if(protocol == ui->regs.synthpod.module_add.urid)
 	{
@@ -5018,8 +5113,8 @@ sp_ui_resize(sp_ui_t *ui, int w, int h)
 	if(!ui)
 		return;
 
-	if(ui->table)
-		evas_object_resize(ui->table, w, h);
+	if(ui->vbox)
+		evas_object_resize(ui->vbox, w, h);
 }
 
 void
@@ -5096,10 +5191,10 @@ sp_ui_free(sp_ui_t *ui)
 		evas_object_del(ui->mainpane);
 	if(ui->popup)
 		evas_object_del(ui->popup);
-	if(ui->table)
+	if(ui->vbox)
 	{
-		elm_table_clear(ui->table, EINA_FALSE); //TODO
-		evas_object_del(ui->table);
+		elm_box_clear(ui->vbox);
+		evas_object_del(ui->vbox);
 	}
 
 	//evas_object_event_callback_del(ui->win, EVAS_CALLBACK_RESIZE, _resize);

@@ -92,7 +92,6 @@ struct _prog_t {
 		jack_nframes_t ref_frames;
 		jack_time_t cur_usecs;
 		jack_time_t nxt_usecs;
-		float T;
 		double dT;
 		double dTm1;
 	} cycle;
@@ -378,13 +377,6 @@ _message_cb(const char *path, const char *fmt, const LV2_Atom_Tuple *body,
 	handle->osc_ptr = ptr;
 }
 
-//FIXME
-static int64_t
-_osc_schedule_osc2frames(osc_schedule_handle_t instance, uint64_t timestamp);
-static uint64_t
-_osc_schedule_frames2osc(osc_schedule_handle_t instance, int64_t frames);
-//FIXME
-
 // rt
 static int
 _process(jack_nframes_t nsamples, void *data)
@@ -395,29 +387,22 @@ _process(jack_nframes_t nsamples, void *data)
 
 #if defined(JACK_HAS_CYCLE_TIMES)
 	clock_gettime(CLOCK_REALTIME, &handle->ntp);
+	handle->ntp.tv_sec += JAN_1970; // convert NTP to OSC time
 	jack_nframes_t offset = jack_frames_since_cycle_start(handle->client);
 
+	float T;
 	jack_get_cycle_times(handle->client, &handle->cycle.cur_frames,
-		&handle->cycle.cur_usecs, &handle->cycle.nxt_usecs, &handle->cycle.T);
-
+		&handle->cycle.cur_usecs, &handle->cycle.nxt_usecs, &T);
+	(void)T;
+	
 	handle->cycle.ref_frames = handle->cycle.cur_frames + offset;
-	handle->ntp.tv_sec += JAN_1970; // convert NTP to OSC time
-	handle->cycle.dT = 1e6 * (double)nsamples
-		/ (double)(handle->cycle.nxt_usecs - handle->cycle.cur_usecs);
-	handle->cycle.dTm1 = 1e-6 * (double)(handle->cycle.nxt_usecs - handle->cycle.cur_usecs)
-		/ (double)nsamples;
-	/* less exact
-	handle->cycle.dT = 1e6 * (double)nsamples / (double)handle->cycle.T;
-	handle->cycle.dTm1 = 1e-6 * (double)handle->cycle.T / (double)nsamples;
-	*/
 
-	/*
-	// debug
-	int64_t frame1 = 12345678LL;
-	uint64_t osc1 = _osc_schedule_frames2osc(handle, frame1);
-	int64_t frame2 = _osc_schedule_osc2frames(handle, osc1);
-	printf("%li %li\n", frame1, frame2);
-	*/
+	// calculate apparent period
+	double diff = 1e-6 * (handle->cycle.nxt_usecs - handle->cycle.cur_usecs);
+
+	// calculate apparent samples per period
+	handle->cycle.dT = nsamples / diff;
+	handle->cycle.dTm1 = 1.0 / handle->cycle.dT;
 #endif
 
 	// get transport position
@@ -446,6 +431,7 @@ _process(jack_nframes_t nsamples, void *data)
 			{
 				case SYSTEM_PORT_NONE:
 				case SYSTEM_PORT_CONTROL:
+				case SYSTEM_PORT_COM:
 					break;
 
 				case SYSTEM_PORT_AUDIO:
@@ -549,6 +535,31 @@ _process(jack_nframes_t nsamples, void *data)
 
 				break;
 			}
+
+			case SYSTEM_PORT_COM:
+			{
+				void *seq_in = source->buf;
+
+				LV2_Atom_Forge *forge = &handle->forge;
+				LV2_Atom_Forge_Frame frame;
+				lv2_atom_forge_set_buffer(forge, seq_in, SEQ_SIZE);
+				lv2_atom_forge_sequence_head(forge, &frame, 0);
+
+				const LV2_Atom_Object *obj;
+				size_t size;
+				while((obj = varchunk_read_request(bin->app_from_com, &size)))
+				{
+					lv2_atom_forge_frame_time(forge, 0);
+					lv2_atom_forge_raw(forge, obj, size);
+					lv2_atom_forge_pad(forge, size);
+
+					varchunk_read_advance(bin->app_from_com);
+				}
+
+				lv2_atom_forge_pop(forge, &frame);
+
+				break;
+			}
 		}
 	}
 
@@ -636,6 +647,20 @@ _process(jack_nframes_t nsamples, void *data)
 
 				break;
 			}
+
+			case SYSTEM_PORT_COM:
+			{
+				const LV2_Atom_Sequence *seq_out = sink->buf;
+
+				LV2_ATOM_SEQUENCE_FOREACH(seq_out, ev)
+				{
+					const LV2_Atom *atom = (const LV2_Atom *)&ev->body;
+
+					sp_app_from_ui(bin->app, atom);
+					//FIXME is this the right place?
+				}
+				break;
+			}
 		}
 	}
 	
@@ -658,7 +683,9 @@ _session_async(void *data)
 		ev->session_dir, ev->client_uuid, ev->command_line);
 	*/
 
-	asprintf(&ev->command_line, "synthpod_jack -u %s $(SESSION_DIR)",
+	char *synthpod_dir = ecore_file_realpath(ev->session_dir);
+
+	asprintf(&ev->command_line, "synthpod_jack -u %s ${SESSION_DIR}",
 		ev->client_uuid);
 
 	switch(ev->type)
@@ -668,14 +695,16 @@ _session_async(void *data)
 			// fall-through
 		case JackSessionSave:
 			handle->save_state = SAVE_STATE_JACK;
-			sp_ui_bundle_save(bin->ui, ev->session_dir, 1);
+			sp_ui_bundle_save(bin->ui, synthpod_dir, 1);
 			break;
 		case JackSessionSaveTemplate:
 			handle->save_state = SAVE_STATE_JACK;
 			sp_ui_bundle_new(bin->ui);
-			sp_ui_bundle_save(bin->ui, ev->session_dir, 1);
+			sp_ui_bundle_save(bin->ui, synthpod_dir, 1);
 			break;
 	}
+
+	free(synthpod_dir);
 }
 
 // non-rt
@@ -816,6 +845,12 @@ _system_port_add(void *data, system_port_t type, const char *short_name,
 					"http://jackaudio.org/metadata/event-types", "OSC", "text/plain");
 			}
 #endif
+			break;
+		}
+
+		case SYSTEM_PORT_COM:
+		{
+			// unsupported, skip
 			break;
 		}
 	}
@@ -1023,7 +1058,7 @@ _osc_schedule_osc2frames(osc_schedule_handle_t instance, uint64_t timestamp)
 		- handle->cycle.cur_frames
 		+ diff * handle->cycle.dT;
 
-	int64_t frames = round(frames_d);
+	int64_t frames = ceil(frames_d);
 
 	return frames;
 }
@@ -1164,6 +1199,7 @@ elm_main(int argc, char **argv)
 #else
 	bin->app_driver.osc_sched = NULL;
 #endif
+	bin->app_driver.features = SP_APP_FEATURE_POWER_OF_2_BLOCK_LENGTH; // always true for JACK
 
 	bin->ui_driver.saved = _ui_saved;
 
