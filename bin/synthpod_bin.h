@@ -125,7 +125,11 @@ _ui_animator(void *data)
 	const LV2_Atom *atom;
 	unsigned n = 0;
 	while((atom = varchunk_read_request(bin->app_to_ui, &size))
+#if 0
 		&& (n++ < MAX_MSGS) )
+#else
+		)
+#endif
 	{
 		sp_ui_from_app(bin->ui, atom);
 		varchunk_read_advance(bin->app_to_ui);
@@ -427,6 +431,7 @@ bin_run(bin_t *bin, char **argv, const synthpod_nsm_driver_t *nsm_driver)
 	elm_run();
 
 	// ui deinit
+	sp_ui_del(bin->ui, true);
 	sp_ui_free(bin->ui);
 
 	if(bin->win)
