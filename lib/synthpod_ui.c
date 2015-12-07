@@ -329,7 +329,7 @@ struct _sp_ui_t {
 
 	Elm_Object_Item *sink_itm;
 
-	volatile int dirty;
+	int dirty;
 };
 
 static Eina_Bool
@@ -367,6 +367,8 @@ _urid_cmp(const void *data1, const void *data2)
 {
 	const property_t *prop1 = data1;
 	const property_t *prop2 = data2;
+	if(!prop1 || !prop2)
+		return 1;
 
 	return prop1->tar_urid < prop2->tar_urid
 		? -1
@@ -418,9 +420,13 @@ _stditc_cmp(const void *data1, const void *data2)
 {
 	const Elm_Object_Item *itm1 = data1;
 	const Elm_Object_Item *itm2 = data2;
+	if(!itm1 || !itm2)
+		return 1;
 
 	port_t *port1 = elm_object_item_data_get(itm1);
 	port_t *port2 = elm_object_item_data_get(itm2);
+	if(!port1 || !port2)
+		return 1;
 
 	// compare port indeces
 	return port1->index < port2->index
@@ -435,12 +441,20 @@ _propitc_cmp(const void *data1, const void *data2)
 {
 	const Elm_Object_Item *itm1 = data1;
 	const Elm_Object_Item *itm2 = data2;
+	if(!itm1 || !itm2)
+		return 1;
 
 	property_t *prop1 = elm_object_item_data_get(itm1);
 	property_t *prop2 = elm_object_item_data_get(itm2);
+	if(!prop1 || !prop2)
+		return 1;
 
-	// compare property labels (case insensitive)
-	return strcasecmp(prop1->label, prop2->label);
+	// compare property URIDs
+	return prop1->tar_urid < prop2->tar_urid
+		? -1
+		: (prop1->tar_urid > prop2->tar_urid
+			? 1
+			: 0);
 }
 
 static inline void
@@ -745,6 +759,17 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 							// append property to corresponding group
 							if(group)
 								group->children = eina_list_append(group->children, prop);
+
+							// append property to UI
+							if(parent) //TODO remove duplicate code
+							{
+								Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
+									ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
+									NULL, NULL);
+								int select_mode = ELM_OBJECT_SELECT_MODE_NONE;
+								elm_genlist_item_select_mode_set(elmnt, select_mode);
+								prop->std.elmnt = elmnt;
+							}
 						}
 					}
 					else if(atom_prop->key == ui->regs.patch.writable.urid)
@@ -765,11 +790,26 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 							// append property to corresponding group
 							if(group)
 								group->children = eina_list_append(group->children, prop);
+
+							// append property to UI
+							if(parent) //TODO remove duplicate code
+							{
+								Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
+									ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
+									NULL, NULL);
+								int select_mode = (prop->type_urid == ui->forge.String)
+									|| (prop->type_urid == ui->forge.URI)
+										? ELM_OBJECT_SELECT_MODE_DEFAULT
+										: ELM_OBJECT_SELECT_MODE_NONE;
+								elm_genlist_item_select_mode_set(elmnt, select_mode);
+								prop->std.elmnt = elmnt;
+							}
 						}
 					}
 					else if(atom_prop->key == ui->regs.rdfs.label.urid)
 					{
 						const LV2_URID tar_urid = subject->body;
+
 						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
 						if(prop)
@@ -782,6 +822,7 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 					else if(atom_prop->key == ui->regs.rdfs.range.urid)
 					{
 						const LV2_URID tar_urid = subject->body;
+
 						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
 						if(prop)
@@ -794,6 +835,7 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 					else if(atom_prop->key == ui->regs.core.minimum.urid)
 					{
 						const LV2_URID tar_urid = subject->body;
+
 						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
 						if(prop)
@@ -814,6 +856,7 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 					else if(atom_prop->key == ui->regs.core.maximum.urid)
 					{
 						const LV2_URID tar_urid = subject->body;
+
 						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
 						if(prop)
@@ -834,6 +877,7 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 					else if(atom_prop->key == ui->regs.core.scale_point.urid)
 					{
 						const LV2_URID tar_urid = subject->body;
+
 						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
 						if(prop)
@@ -887,14 +931,6 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 							}
 						}
 					}
-				}
-
-				// trigger update for Properties
-				if(parent)
-				{
-					//FIXME solve differently
-					//evas_object_smart_callback_call(ui->modlist, "contract,request", parent);
-					//evas_object_smart_callback_call(ui->modlist, "expand,request", parent);
 				}
 			}
 			else
@@ -1875,6 +1911,8 @@ _bank_cmp(const void *data1, const void *data2)
 {
 	const LilvNode *node1 = data1;
 	const LilvNode *node2 = data2;
+	if(!node1 || !node2)
+		return 1;
 
 	return lilv_node_equals(node1, node2)
 		? 0
