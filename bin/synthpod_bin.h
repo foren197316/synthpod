@@ -55,7 +55,14 @@ enum _save_state_t {
 	SAVE_STATE_JACK
 };
 
+typedef struct _light_sem_t light_sem_t;
 typedef struct _bin_t bin_t;
+
+struct _light_sem_t {
+	Eina_Semaphore sem;
+	_Atomic int count;
+	int spin;
+};
 
 struct _bin_t {
 	ext_urid_t *ext_urid;
@@ -68,6 +75,9 @@ struct _bin_t {
 	varchunk_t *app_to_log;
 
 	varchunk_t *app_from_com;
+
+	bool advance_ui;
+	varchunk_t *app_from_app;
 
 	char *path;
 	synthpod_nsm_t *nsm;
@@ -84,8 +94,7 @@ struct _bin_t {
 	
 	_Atomic int worker_dead;
 	Eina_Thread worker_thread;
-	Eina_Semaphore worker_sem;
-	bool worker_sem_needs_release;
+	light_sem_t worker_sem;
 
 	LV2_URID log_entry;
 	LV2_URID log_error;
@@ -93,6 +102,71 @@ struct _bin_t {
 	LV2_URID log_trace;
 	LV2_URID log_warning;
 };
+
+static inline void
+_light_sem_init(light_sem_t *lsem, int count)
+{
+	assert(count >= 0);
+	eina_semaphore_new(&lsem->sem, count);
+	lsem->spin = 10000; //TODO make this configurable or self-adapting
+}
+
+static inline void
+_light_sem_deinit(light_sem_t *lsem)
+{
+	eina_semaphore_free(&lsem->sem);
+}
+
+static inline void
+_light_sem_wait_partial_spinning(light_sem_t *lsem)
+{
+	int old_count;
+	int spin = lsem->spin;
+
+	while(spin--)
+	{
+		old_count = atomic_load_explicit(&lsem->count, memory_order_relaxed);
+
+		if(  (old_count > 0) && atomic_compare_exchange_strong_explicit(
+			&lsem->count, &old_count, old_count - 1, memory_order_acquire, memory_order_acquire) )
+		{
+			return; // immediately return from wait as there was a new signal while spinning
+		}
+
+		atomic_signal_fence(memory_order_acquire); // prevent compiler from collapsing the loop
+	}
+
+	old_count = atomic_fetch_sub_explicit(&lsem->count, 1, memory_order_acquire);
+
+	if(old_count <= 0)
+		eina_semaphore_lock(&lsem->sem);
+}
+
+static inline bool
+_light_sem_trywait(light_sem_t *lsem)
+{
+	int old_count = atomic_load_explicit(&lsem->count, memory_order_relaxed);
+
+	return (old_count > 0) && atomic_compare_exchange_strong_explicit(
+		&lsem->count, &old_count, old_count - 1, memory_order_acquire, memory_order_acquire);
+}
+
+static inline void
+_light_sem_wait(light_sem_t *lsem)
+{
+	if(!_light_sem_trywait(lsem))
+		_light_sem_wait_partial_spinning(lsem);
+}
+
+static inline void
+_light_sem_signal(light_sem_t *lsem, int count)
+{
+	int old_count = atomic_fetch_add_explicit(&lsem->count, count, memory_order_release);
+	int to_release = -old_count < count ? -old_count : count;
+
+	if(to_release > 0) // old_count changed from (-1) to (0)
+		eina_semaphore_release(&lsem->sem, to_release);
+}
 
 // non-rt ui-thread
 static void
@@ -160,7 +234,7 @@ _worker_thread(void *data, Eina_Thread thread)
 
 	while(!atomic_load_explicit(&bin->worker_dead, memory_order_relaxed))
 	{
-		eina_semaphore_lock(&bin->worker_sem);
+		_light_sem_wait(&bin->worker_sem);
 
 		size_t size;
 		const void *body;
@@ -248,7 +322,7 @@ _app_to_worker_advance(size_t size, void *data)
 	bin_t *bin = data;
 
 	varchunk_write_advance(bin->app_to_worker, size);
-	bin->worker_sem_needs_release = true;
+	_light_sem_signal(&bin->worker_sem, 1);
 }
 
 // non-rt worker-thread
@@ -289,7 +363,7 @@ _log_vprintf(void *data, LV2_URID type, const char *fmt, va_list args)
 
 			size_t written = strlen(trace) + 1;
 			varchunk_write_advance(bin->app_to_log, written);
-			bin->worker_sem_needs_release = true;
+			_light_sem_signal(&bin->worker_sem, 1);
 		}
 	}
 	else // !log_trace
@@ -362,6 +436,7 @@ bin_init(bin_t *bin)
 	bin->app_from_worker = varchunk_new(CHUNK_SIZE);
 	bin->app_to_log = varchunk_new(CHUNK_SIZE);
 	bin->app_from_com = varchunk_new(CHUNK_SIZE);
+	bin->app_from_app = varchunk_new(CHUNK_SIZE);
 
 	bin->ext_urid = ext_urid_new();
 	LV2_URID_Map *map = ext_urid_map_get(bin->ext_urid);
@@ -422,7 +497,7 @@ bin_run(bin_t *bin, char **argv, const synthpod_nsm_driver_t *nsm_driver)
 
 	// init semaphores
 	atomic_init(&bin->worker_dead, 0);
-	eina_semaphore_new(&bin->worker_sem, 0);
+	_light_sem_init(&bin->worker_sem, 0);
 
 	// threads init
 	Eina_Bool status = eina_thread_create(&bin->worker_thread,
@@ -449,14 +524,14 @@ bin_stop(bin_t *bin)
 {
 	// threads deinit
 	atomic_store_explicit(&bin->worker_dead, 1, memory_order_relaxed);
-	eina_semaphore_release(&bin->worker_sem, 1);
+	_light_sem_signal(&bin->worker_sem, 1);
 	eina_thread_join(bin->worker_thread);
 
 	// NSM deinit
 	synthpod_nsm_free(bin->nsm);
 
 	// deinit semaphores
-	eina_semaphore_free(&bin->worker_sem);
+	_light_sem_deinit(&bin->worker_sem);
 
 	if(bin->path)
 		free(bin->path);
@@ -478,13 +553,13 @@ bin_deinit(bin_t *bin)
 	varchunk_free(bin->app_to_worker);
 	varchunk_free(bin->app_from_worker);
 	varchunk_free(bin->app_from_com);
+	varchunk_free(bin->app_from_app);
 }
 
 static inline void
-bin_process_pre(bin_t *bin, uint32_t nsamples, int paused)
+bin_process_pre(bin_t *bin, uint32_t nsamples, bool bypassed)
 {
 	// read events from worker
-	if(!paused) // aka not saving state
 	{
 		size_t size;
 		const void *body;
@@ -492,16 +567,21 @@ bin_process_pre(bin_t *bin, uint32_t nsamples, int paused)
 		while((body = varchunk_read_request(bin->app_from_worker, &size))
 			&& (n++ < MAX_MSGS) )
 		{
-			sp_app_from_worker(bin->app, size, body);
+			bool advance = sp_app_from_worker(bin->app, size, body);
+			if(!advance)
+			{
+				//fprintf(stderr, "worker is blocked\n");
+				break;
+			}
 			varchunk_read_advance(bin->app_from_worker);
 		}
 	}
 
 	// run synthpod app pre
-	sp_app_run_pre(bin->app, nsamples);
+	if(!bypassed)
+		sp_app_run_pre(bin->app, nsamples);
 
-	// read events from UI
-	if(!paused) // aka not saving state
+	// read events from UI ringbuffer
 	{
 		size_t size;
 		const LV2_Atom *atom;
@@ -509,23 +589,42 @@ bin_process_pre(bin_t *bin, uint32_t nsamples, int paused)
 		while((atom = varchunk_read_request(bin->app_from_ui, &size))
 			&& (n++ < MAX_MSGS) )
 		{
-			sp_app_from_ui(bin->app, atom);
+			bin->advance_ui = sp_app_from_ui(bin->app, atom);
+			if(!bin->advance_ui)
+			{
+				//fprintf(stderr, "ui is blocked\n");
+				break;
+			}
 			varchunk_read_advance(bin->app_from_ui);
+		}
+	}
+
+	// read events from feedback ringbuffer
+	{
+		size_t size;
+		const LV2_Atom *atom;
+		unsigned n = 0;
+		while((atom = varchunk_read_request(bin->app_from_app, &size))
+			&& (n++ < MAX_MSGS) )
+		{
+			bin->advance_ui = sp_app_from_ui(bin->app, atom);
+			if(!bin->advance_ui)
+			{
+				//fprintf(stderr, "ui is blocked\n");
+				break;
+			}
+			varchunk_read_advance(bin->app_from_app);
 		}
 	}
 	
 	// run synthpod app post
-	sp_app_run_post(bin->app, nsamples);
+	if(!bypassed)
+		sp_app_run_post(bin->app, nsamples);
 }
 
 static inline void
 bin_process_post(bin_t *bin)
 {
-	if(bin->worker_sem_needs_release)
-	{
-		eina_semaphore_release(&bin->worker_sem, 1);
-		bin->worker_sem_needs_release = false;
-	}
 }
 
 #endif

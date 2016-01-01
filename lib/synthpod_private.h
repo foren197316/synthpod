@@ -41,23 +41,35 @@
 #include <lv2/lv2plug.in/ns/ext/patch/patch.h>
 #include <lv2/lv2plug.in/ns/ext/port-props/port-props.h>
 #include <lv2/lv2plug.in/ns/ext/port-groups/port-groups.h>
+#include <lv2/lv2plug.in/ns/ext/state/state.h>
+#include <lv2/lv2plug.in/ns/ext/time/time.h>
 #include <lv2/lv2plug.in/ns/extensions/ui/ui.h>
 #include <lv2/lv2plug.in/ns/extensions/units/units.h>
 #include <zero_worker.h>
 #include <lv2_external_ui.h> // kxstudio kx-ui extension
 
 typedef enum _port_type_t port_type_t;
+typedef enum _port_atom_type_t port_atom_type_t;
 typedef enum _port_buffer_type_t port_buffer_type_t;
 typedef enum _port_direction_t port_direction_t;
 typedef enum _port_protocol_t port_protocol_t;
 
 enum _port_type_t {
 	PORT_TYPE_AUDIO,
-	PORT_TYPE_ATOM,
 	PORT_TYPE_CONTROL,
 	PORT_TYPE_CV,
+	PORT_TYPE_ATOM,
 
 	PORT_TYPE_NUM
+};
+
+enum _port_atom_type_t {
+	PORT_ATOM_TYPE_ALL		= 0,
+
+	PORT_ATOM_TYPE_MIDI		= (1 << 0),
+	PORT_ATOM_TYPE_OSC		= (1 << 1),
+	PORT_ATOM_TYPE_TIME		= (1 << 2),
+	PORT_ATOM_TYPE_PATCH	= (1 << 3)
 };
 
 enum _port_buffer_type_t {
@@ -107,6 +119,8 @@ struct _reg_t {
 
 		// atom sequence event types
 		reg_item_t midi;
+		reg_item_t osc_event;
+		reg_item_t time_position;
 
 		// control port property
 		reg_item_t integer;
@@ -205,6 +219,7 @@ struct _reg_t {
 		reg_item_t patch;
 		reg_item_t add;
 		reg_item_t remove;
+		reg_item_t put;
 	} patch;
 
 	struct {
@@ -247,6 +262,11 @@ struct _reg_t {
 	} units;
 
 	struct {
+		reg_item_t state;
+		reg_item_t load_default_state;
+	} state;
+
+	struct {
 		reg_item_t com_event;
 		reg_item_t transfer_event;
 		reg_item_t payload;
@@ -275,6 +295,8 @@ struct _reg_t {
 		reg_item_t midi_port;
 		reg_item_t osc_port;
 		reg_item_t com_port;
+
+		reg_item_t feedback_block;
 	} synthpod;
 };
 
@@ -305,6 +327,8 @@ sp_regs_init(reg_t *regs, LilvWorld *world, LV2_URID_Map *map)
 
 	_register(&regs->port.sequence, world, map, LV2_ATOM__Sequence);
 	_register(&regs->port.midi, world, map, LV2_MIDI__MidiEvent);
+	_register(&regs->port.osc_event, world, map, "http://open-music-kontrollers.ch/lv2/osc#Event");
+	_register(&regs->port.time_position, world, map, LV2_TIME__Position);
 
 	_register(&regs->port.integer, world, map, LV2_CORE__integer);
 	_register(&regs->port.enumeration, world, map, LV2_CORE__enumeration);
@@ -337,6 +361,12 @@ sp_regs_init(reg_t *regs, LilvWorld *world, LV2_URID_Map *map)
 	_register(&regs->ui.plugin, world, map, LV2_UI__plugin);
 	_register(&regs->ui.protocol, world, map, LV2_UI_PREFIX"protocol");
 
+#ifndef LV2_PRESETS__bank
+#	define LV2_PRESETS__bank LV2_PRESETS_PREFIX "bank"
+#endif
+#ifndef LV2_PRESETS__Bank
+#	define LV2_PRESETS__Bank LV2_PRESETS_PREFIX "Bank"
+#endif
 	_register(&regs->pset.preset, world, map, LV2_PRESETS__Preset);
 	_register(&regs->pset.preset_bank, world, map, LV2_PRESETS__bank);
 	_register(&regs->pset.bank, world, map, LV2_PRESETS__Bank);
@@ -378,6 +408,7 @@ sp_regs_init(reg_t *regs, LilvWorld *world, LV2_URID_Map *map)
 	_register(&regs->patch.patch, world, map, LV2_PATCH__Patch);
 	_register(&regs->patch.add, world, map, LV2_PATCH__add);
 	_register(&regs->patch.remove, world, map, LV2_PATCH__remove);
+	_register(&regs->patch.put, world, map, LV2_PATCH__Put);
 
 	_register(&regs->group.group, world, map, LV2_PORT_GROUPS__group);
 
@@ -411,6 +442,9 @@ sp_regs_init(reg_t *regs, LilvWorld *world, LV2_URID_Map *map)
 	_register(&regs->units.s, world, map, LV2_UNITS__s);
 	_register(&regs->units.semitone12TET, world, map, LV2_UNITS__semitone12TET);
 
+	_register(&regs->state.state, world, map, LV2_STATE__state);
+	_register(&regs->state.load_default_state, world, map, LV2_STATE__loadDefaultState);
+
 	_register(&regs->synthpod.com_event, world, map, SYNTHPOD_PREFIX"comEvent");
 	_register(&regs->synthpod.transfer_event, world, map, SYNTHPOD_PREFIX"transferEvent");
 	_register(&regs->synthpod.payload, world, map, SYNTHPOD_PREFIX"payload");
@@ -438,6 +472,8 @@ sp_regs_init(reg_t *regs, LilvWorld *world, LV2_URID_Map *map)
 	_register(&regs->synthpod.midi_port, world, map, SYNTHPOD_PREFIX"MIDIPort");
 	_register(&regs->synthpod.osc_port, world, map, SYNTHPOD_PREFIX"OSCPort");
 	_register(&regs->synthpod.com_port, world, map, SYNTHPOD_PREFIX"ComPort");
+
+	_register(&regs->synthpod.feedback_block, world, map, SYNTHPOD_PREFIX"feedbackBlock");
 }
 
 static inline void
@@ -453,6 +489,8 @@ sp_regs_deinit(reg_t *regs)
 
 	_unregister(&regs->port.sequence);
 	_unregister(&regs->port.midi);
+	_unregister(&regs->port.osc_event);
+	_unregister(&regs->port.time_position);
 
 	_unregister(&regs->port.integer);
 	_unregister(&regs->port.enumeration);
@@ -526,6 +564,7 @@ sp_regs_deinit(reg_t *regs)
 	_unregister(&regs->patch.patch);
 	_unregister(&regs->patch.add);
 	_unregister(&regs->patch.remove);
+	_unregister(&regs->patch.put);
 
 	_unregister(&regs->group.group);
 
@@ -559,6 +598,9 @@ sp_regs_deinit(reg_t *regs)
 	_unregister(&regs->units.s);
 	_unregister(&regs->units.semitone12TET);
 
+	_unregister(&regs->state.state);
+	_unregister(&regs->state.load_default_state);
+
 	_unregister(&regs->synthpod.com_event);
 	_unregister(&regs->synthpod.transfer_event);
 	_unregister(&regs->synthpod.payload);
@@ -586,6 +628,8 @@ sp_regs_deinit(reg_t *regs)
 	_unregister(&regs->synthpod.midi_port);
 	_unregister(&regs->synthpod.osc_port);
 	_unregister(&regs->synthpod.com_port);
+
+	_unregister(&regs->synthpod.feedback_block);
 }
 
 #define _ATOM_ALIGNED __attribute__((aligned(8)))
@@ -1192,7 +1236,7 @@ _sp_transfer_patch_set_fill(reg_t *regs, LV2_Atom_Forge *forge,
 
 	trans->obj.atom.size = obj_size;
 	trans->obj.atom.type = forge->Object;
-	trans->obj.body.id = 0; //TODO or regs->patch.message.urid?
+	trans->obj.body.id = regs->synthpod.feedback_block.urid; // prevent feedback from app FIXME better use that globally on _sp_transfer_fill
 	trans->obj.body.otype = regs->patch.set.urid;
 
 	trans->subj.key = regs->patch.subject.urid;
@@ -1234,7 +1278,7 @@ _sp_transfer_patch_get_fill(reg_t *regs, LV2_Atom_Forge *forge,
 
 	trans->obj.atom.size = obj_size;
 	trans->obj.atom.type = forge->Object;
-	trans->obj.body.id = 0; //TODO or regs->patch.message.urid?
+	trans->obj.body.id = regs->synthpod.feedback_block.urid; // prevent feedback from app
 	trans->obj.body.otype = regs->patch.get.urid;
 
 	trans->subj.key = regs->patch.subject.urid;
@@ -1285,7 +1329,9 @@ static inline LV2_Atom_Forge_Ref
 _lv2_atom_forge_sequence_append(LV2_Atom_Forge *forge, LV2_Atom_Forge_Frame *frame,
 	uint8_t *buf, uint32_t size)
 {
+	assert(buf);
 	buf = ASSUME_ALIGNED(buf);
+	assert(buf);
 	LV2_Atom_Sequence *seq = (LV2_Atom_Sequence *)buf;
 
 	lv2_atom_forge_set_buffer(forge, buf, size);
@@ -1296,6 +1342,17 @@ _lv2_atom_forge_sequence_append(LV2_Atom_Forge *forge, LV2_Atom_Forge_Frame *fra
 	//printf("_lv2_atom_forge_sequence_append: %u\n", forge->offset);
 
 	return ref;
+}
+
+static inline int
+_signum(LV2_URID urid1, LV2_URID urid2)
+{
+	if(urid1 < urid2)
+		return -1;
+	else if(urid1 > urid2)
+		return 1;
+
+	return 0;
 }
 
 #endif // _SYNTHPOD_PRIVATE_H

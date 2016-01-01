@@ -42,6 +42,9 @@ typedef enum _plug_info_type_t plug_info_type_t;
 typedef enum _group_type_t group_type_t;
 typedef struct _plug_info_t plug_info_t;
 
+typedef struct _from_app_t from_app_t;
+typedef void (*from_app_cb_t)(sp_ui_t *ui, const LV2_Atom *atom);
+
 enum _plug_info_type_t {
 	PLUG_INFO_TYPE_NAME = 0,
 	PLUG_INFO_TYPE_URI,
@@ -221,6 +224,7 @@ struct _port_t {
 
 	port_direction_t direction; // input, output
 	port_type_t type; // audio, CV, control, atom
+	port_atom_type_t atom_type; // MIDI, OSC, Time
 	port_buffer_type_t buffer_type; // none, sequence
 	int patchable; // support patch:Message
 
@@ -268,6 +272,7 @@ struct _property_t {
 	float maximum;
 
 	Eina_List *scale_points;
+	char *unit;
 };
 
 struct _sp_ui_t {
@@ -311,6 +316,11 @@ struct _sp_ui_t {
 	Elm_Object_Item *matrix_atom;
 	Elm_Object_Item *matrix_control;
 	Elm_Object_Item *matrix_cv;
+	port_atom_type_t matrix_atom_type;
+	Elm_Object_Item *matrix_atom_midi;
+	Elm_Object_Item *matrix_atom_osc;
+	Elm_Object_Item *matrix_atom_time;
+	Elm_Object_Item *matrix_atom_patch;
 
 	Evas_Object *modlist;
 
@@ -331,6 +341,23 @@ struct _sp_ui_t {
 
 	int dirty;
 };
+
+struct _from_app_t {
+	LV2_URID protocol;
+	from_app_cb_t cb;
+};
+
+#define FROM_APP_NUM 14
+static from_app_t from_apps [FROM_APP_NUM];
+
+static int
+_from_app_cmp(const void *itm1, const void *itm2)
+{
+	const from_app_t *from_app1 = itm1;
+	const from_app_t *from_app2 = itm2;
+
+	return _signum(from_app1->protocol, from_app2->protocol);
+}
 
 static Eina_Bool
 _elm_config_changed(void *data, int ev_type, void *ev)
@@ -457,6 +484,104 @@ _propitc_cmp(const void *data1, const void *data2)
 			: 0);
 }
 
+static void
+_mod_set_property(mod_t *mod, LV2_URID property_val, const LV2_Atom *value)
+{
+	sp_ui_t *ui = mod->ui;
+
+	//printf("ui got patch:Set: %u %u\n",
+	//	mod->uid, property_val);
+
+	property_t *prop;
+	if(  (prop = eina_list_search_sorted(mod->static_properties, _urid_find, &property_val))
+		|| (prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &property_val)) )
+	{
+		if(prop->std.widget &&
+			(    (prop->type_urid == value->type)
+				|| (prop->type_urid + value->type == ui->forge.Int + ui->forge.Bool)
+			) )
+		{
+			if(prop->scale_points)
+			{
+				if(prop->type_urid == ui->forge.String)
+				{
+					smart_spinner_key_set(prop->std.widget, LV2_ATOM_BODY_CONST(value));
+				}
+				else if(prop->type_urid == ui->forge.Int)
+				{
+					int32_t val = ((const LV2_Atom_Int *)value)->body;
+					smart_spinner_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Float)
+				{
+					float val = ((const LV2_Atom_Float *)value)->body;
+					smart_spinner_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Long)
+				{
+					int64_t val = ((const LV2_Atom_Long *)value)->body;
+					smart_spinner_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Double)
+				{
+					double val = ((const LV2_Atom_Double *)value)->body;
+					smart_spinner_value_set(prop->std.widget, val);
+				}
+				//TODO do other types
+			}
+			else // !scale_points
+			{
+				if(  (prop->type_urid == ui->forge.String)
+					|| (prop->type_urid == ui->forge.URI) )
+				{
+					const char *val = LV2_ATOM_BODY_CONST(value);
+					if(prop->editable)
+						elm_entry_entry_set(prop->std.entry, val);
+					else
+						elm_object_text_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Path)
+				{
+					const char *val = LV2_ATOM_BODY_CONST(value);
+					//elm_object_text_set(prop->std.widget, val); TODO ellipsis on button text
+					if(prop->editable)
+						elm_fileselector_path_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Int)
+				{
+					int32_t val = ((const LV2_Atom_Int *)value)->body;
+					smart_slider_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.URID)
+				{
+					uint32_t val = ((const LV2_Atom_URID *)value)->body;
+					smart_slider_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Long)
+				{
+					int64_t val = ((const LV2_Atom_Long *)value)->body;
+					smart_slider_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Float)
+				{
+					float val = ((const LV2_Atom_Float *)value)->body;
+					smart_slider_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Double)
+				{
+					double val = ((const LV2_Atom_Double *)value)->body;
+					smart_slider_value_set(prop->std.widget, val);
+				}
+				else if(prop->type_urid == ui->forge.Bool)
+				{
+					int val = ((const LV2_Atom_Bool *)value)->body;
+					smart_toggle_value_set(prop->std.widget, val);
+				}
+			}
+		}
+	}
+}
+
 static inline void
 _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 	uint32_t protocol, const void *buf)
@@ -507,434 +632,430 @@ _std_port_event(LV2UI_Handle handle, uint32_t index, uint32_t size,
 	{
 		const LV2_Atom_Object *obj = buf;
 
-		// check for patch:Set
 		if(  (obj->atom.type == ui->forge.Object)
-			&& (obj->body.otype == ui->regs.patch.set.urid) )
+			&& (obj->body.id != ui->regs.synthpod.feedback_block.urid) ) // dont' feedback patch messages from UI itself!
 		{
-			const LV2_Atom_URID *subject = NULL;
-			const LV2_Atom_URID *property = NULL;
-			const LV2_Atom *value = NULL;
-
-			LV2_Atom_Object_Query q[] = {
-				{ ui->regs.patch.subject.urid, (const LV2_Atom **)&subject },
-				{ ui->regs.patch.property.urid, (const LV2_Atom **)&property },
-				{ ui->regs.patch.value.urid, &value },
-				LV2_ATOM_OBJECT_QUERY_END
-			};
-			lv2_atom_object_query(obj, q);
-
-			if(property && value)
+			// check for patch:Set
+			if(obj->body.otype == ui->regs.patch.set.urid)
 			{
-				LV2_URID property_val = property->body;
+				const LV2_Atom_URID *subject = NULL;
+				const LV2_Atom_URID *property = NULL;
+				const LV2_Atom *value = NULL;
 
-				//printf("ui got patch:Set: %u %u %s\n",
-				//	subject_val, request_val, body_val);
+				LV2_Atom_Object_Query q[] = {
+					{ ui->regs.patch.subject.urid, (const LV2_Atom **)&subject },
+					{ ui->regs.patch.property.urid, (const LV2_Atom **)&property },
+					{ ui->regs.patch.value.urid, &value },
+					LV2_ATOM_OBJECT_QUERY_END
+				};
+				lv2_atom_object_query(obj, q);
 
-				property_t *prop;
-				if(  (prop = eina_list_search_sorted(mod->static_properties, _urid_find, &property_val))
-					|| (prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &property_val)) )
+				bool subject_match = subject
+					? subject->body == mod->subject
+					: true;
+
+				if(subject_match && property && value)
+					_mod_set_property(mod, property->body, value);
+			}
+			// check for patch:Put
+			else if(obj->body.otype == ui->regs.patch.put.urid)
+			{
+				const LV2_Atom_URID *subject = NULL;
+
+				LV2_Atom_Object_Query q[] = {
+					{ ui->regs.patch.subject.urid, (const LV2_Atom **)&subject },
+					LV2_ATOM_OBJECT_QUERY_END
+				};
+				lv2_atom_object_query(obj, q);
+
+				bool subject_match = subject
+					? subject->body == mod->subject
+					: true;
+
+				if(subject_match)
 				{
-					if(prop->std.widget &&
-						(    (prop->type_urid == value->type)
-							|| (prop->type_urid + value->type == ui->forge.Int + ui->forge.Bool)
-						) )
+					LV2_ATOM_OBJECT_FOREACH(obj, prop)
 					{
-						if(prop->scale_points)
-						{
-							if(prop->type_urid == ui->forge.String)
-							{
-								smart_spinner_key_set(prop->std.widget, LV2_ATOM_BODY_CONST(value));
-							}
-							else if(prop->type_urid == ui->forge.Int)
-							{
-								int32_t val = ((const LV2_Atom_Int *)value)->body;
-								smart_spinner_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Float)
-							{
-								float val = ((const LV2_Atom_Float *)value)->body;
-								smart_spinner_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Long)
-							{
-								int64_t val = ((const LV2_Atom_Long *)value)->body;
-								smart_spinner_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Double)
-							{
-								double val = ((const LV2_Atom_Double *)value)->body;
-								smart_spinner_value_set(prop->std.widget, val);
-							}
-							//TODO do other types
-						}
-						else // !scale_points
-						{
-							if(  (prop->type_urid == ui->forge.String)
-								|| (prop->type_urid == ui->forge.URI) )
-							{
-								const char *val = LV2_ATOM_BODY_CONST(value);
-								if(prop->editable)
-									elm_entry_entry_set(prop->std.entry, val);
-								else
-									elm_object_text_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Path)
-							{
-								const char *val = LV2_ATOM_BODY_CONST(value);
-								elm_object_text_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Int)
-							{
-								int32_t val = ((const LV2_Atom_Int *)value)->body;
-								smart_slider_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.URID)
-							{
-								uint32_t val = ((const LV2_Atom_URID *)value)->body;
-								smart_slider_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Long)
-							{
-								int64_t val = ((const LV2_Atom_Long *)value)->body;
-								smart_slider_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Float)
-							{
-								float val = ((const LV2_Atom_Float *)value)->body;
-								smart_slider_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Double)
-							{
-								double val = ((const LV2_Atom_Double *)value)->body;
-								smart_slider_value_set(prop->std.widget, val);
-							}
-							else if(prop->type_urid == ui->forge.Bool)
-							{
-								int val = ((const LV2_Atom_Bool *)value)->body;
-								smart_toggle_value_set(prop->std.widget, val);
-							}
-						}
+						_mod_set_property(mod, prop->key, &prop->value);
 					}
 				}
 			}
-		}
-		// check for patch:Patch
-		else if(  (obj->atom.type == ui->forge.Object)
-			&& (obj->body.otype == ui->regs.patch.patch.urid) )
-		{
-			const LV2_Atom_URID *subject = NULL;
-			const LV2_Atom_Object *add = NULL;
-			const LV2_Atom_Object *remove = NULL;
-
-			LV2_Atom_Object_Query q[] = {
-				{ ui->regs.patch.subject.urid, (const LV2_Atom **)&subject },
-				{ ui->regs.patch.add.urid, (const LV2_Atom **)&add },
-				{ ui->regs.patch.remove.urid, (const LV2_Atom **)&remove },
-				LV2_ATOM_OBJECT_QUERY_END
-			};
-			lv2_atom_object_query(obj, q);
-
-			if(subject && add && remove)
+			// check for patch:Patch
+			else if(obj->body.otype == ui->regs.patch.patch.urid)
 			{
-				const char *group_lbl = "*Properties*";
-				Elm_Object_Item *parent = eina_hash_find(mod->groups, group_lbl);
-				if(!parent)
+				const LV2_Atom_URID *subject = NULL;
+				const LV2_Atom_Object *add = NULL;
+				const LV2_Atom_Object *remove = NULL;
+
+				LV2_Atom_Object_Query q[] = {
+					{ ui->regs.patch.subject.urid, (const LV2_Atom **)&subject },
+					{ ui->regs.patch.add.urid, (const LV2_Atom **)&add },
+					{ ui->regs.patch.remove.urid, (const LV2_Atom **)&remove },
+					LV2_ATOM_OBJECT_QUERY_END
+				};
+				lv2_atom_object_query(obj, q);
+
+				if(subject && add && remove)
 				{
-					group_t *group = calloc(1, sizeof(group_t));
-					if(group)
+					const char *group_lbl = "*Properties*";
+					Elm_Object_Item *parent = eina_hash_find(mod->groups, group_lbl);
+					if(!parent)
 					{
-						group->type = GROUP_TYPE_PROPERTY;
-						group->mod = mod;
-
-						parent = elm_genlist_item_sorted_insert(ui->modlist,
-							ui->grpitc, group, mod->std.itm, ELM_GENLIST_ITEM_TREE, _grpitc_cmp, NULL, NULL);	
-						elm_genlist_item_select_mode_set(parent, ELM_OBJECT_SELECT_MODE_NONE);
-						if(parent)
-							eina_hash_add(mod->groups, group_lbl, parent);
-					}
-				}
-				
-				group_t *group = elm_object_item_data_get(parent);
-
-				LV2_ATOM_OBJECT_FOREACH(remove, atom_prop)
-				{
-					if(atom_prop->key == ui->regs.patch.readable.urid)
-					{
-						const LV2_URID tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
+						group_t *group = calloc(1, sizeof(group_t));
+						if(group)
 						{
-							if(group)
-								group->children = eina_list_remove(group->children, prop);
+							group->type = GROUP_TYPE_PROPERTY;
+							group->mod = mod;
 
-							mod->dynamic_properties = eina_list_remove(mod->dynamic_properties, prop);
-							free(prop);
+							parent = elm_genlist_item_sorted_insert(ui->modlist,
+								ui->grpitc, group, mod->std.itm, ELM_GENLIST_ITEM_TREE, _grpitc_cmp, NULL, NULL);	
+							elm_genlist_item_select_mode_set(parent, ELM_OBJECT_SELECT_MODE_NONE);
+							if(parent)
+								eina_hash_add(mod->groups, group_lbl, parent);
 						}
 					}
-					else if(atom_prop->key == ui->regs.patch.writable.urid)
-					{
-						const LV2_URID tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+					
+					group_t *group = elm_object_item_data_get(parent);
 
-						if(prop)
+					LV2_ATOM_OBJECT_FOREACH(remove, atom_prop)
+					{
+						if(atom_prop->key == ui->regs.patch.readable.urid)
 						{
-							if(group)
-								group->children = eina_list_remove(group->children, prop);
+							if(subject->body != mod->subject)
+								continue; // ignore alien patch events
 
-							mod->dynamic_properties = eina_list_remove(mod->dynamic_properties, prop);
-							free(prop);
-						}
-					}
-					else if(atom_prop->key == ui->regs.rdfs.label.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+							const LV2_URID tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
-						if(prop && prop->label)
-						{
-							free(prop->label);
-							prop->label = NULL;
-						}
-					}
-					else if(atom_prop->key == ui->regs.rdfs.range.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-							prop->type_urid = 0;
-					}
-					else if(atom_prop->key == ui->regs.core.minimum.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-							prop->minimum = 0.f;
-					}
-					else if(atom_prop->key == ui->regs.core.maximum.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-							prop->maximum = 1.f;
-					}
-					else if(atom_prop->key == ui->regs.core.scale_point.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-						{
-							point_t *p;
-							EINA_LIST_FREE(prop->scale_points, p)
+							if(prop)
 							{
-								free(p->label);
-								free(p->s);
-								free(p);
+								if(group)
+									group->children = eina_list_remove(group->children, prop);
+
+								mod->dynamic_properties = eina_list_remove(mod->dynamic_properties, prop);
+								free(prop);
+							}
+						}
+						else if(atom_prop->key == ui->regs.patch.writable.urid)
+						{
+							if(subject->body != mod->subject)
+								continue; // ignore alien patch events
+
+							const LV2_URID tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								if(group)
+									group->children = eina_list_remove(group->children, prop);
+
+								mod->dynamic_properties = eina_list_remove(mod->dynamic_properties, prop);
+								free(prop);
+							}
+						}
+						else if(atom_prop->key == ui->regs.rdfs.label.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop && prop->label)
+							{
+								free(prop->label);
+								prop->label = NULL;
+							}
+						}
+						else if(atom_prop->key == ui->regs.rdfs.range.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+								prop->type_urid = 0;
+						}
+						else if(atom_prop->key == ui->regs.core.minimum.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+								prop->minimum = 0.f;
+						}
+						else if(atom_prop->key == ui->regs.core.maximum.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+								prop->maximum = 1.f;
+						}
+						else if(atom_prop->key == ui->regs.units.unit.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop && prop->unit)
+							{
+								free(prop->unit);
+								prop->unit = NULL;
+							}
+						}
+						else if(atom_prop->key == ui->regs.core.scale_point.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								point_t *p;
+								EINA_LIST_FREE(prop->scale_points, p)
+								{
+									free(p->label);
+									free(p->s);
+									free(p);
+								}
 							}
 						}
 					}
-				}
 
-				LV2_ATOM_OBJECT_FOREACH(add, atom_prop)
-				{
-					if(atom_prop->key == ui->regs.patch.readable.urid)
+					LV2_ATOM_OBJECT_FOREACH(add, atom_prop)
 					{
-						property_t *prop = calloc(1, sizeof(property_t));
-						if(prop)
+						if(atom_prop->key == ui->regs.patch.readable.urid)
 						{
-							prop->mod = mod;
-							prop->editable = 0;
-							prop->tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
-							prop->label = NULL; // not yet known
-							prop->type_urid = 0; // not yet known
-							prop->minimum = 0.f; // not yet known
-							prop->maximum = 1.f; // not yet known
+							if(subject->body != mod->subject)
+								continue; // ignore alien patch events
 
-							mod->dynamic_properties = eina_list_sorted_insert(mod->dynamic_properties, _urid_cmp, prop);
-
-							// append property to corresponding group
-							if(group)
-								group->children = eina_list_append(group->children, prop);
-
-							// append property to UI
-							if(parent) //TODO remove duplicate code
+							property_t *prop = calloc(1, sizeof(property_t));
+							if(prop)
 							{
-								Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
-									ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
-									NULL, NULL);
-								int select_mode = ELM_OBJECT_SELECT_MODE_NONE;
-								elm_genlist_item_select_mode_set(elmnt, select_mode);
-								prop->std.elmnt = elmnt;
+								prop->mod = mod;
+								prop->editable = 0;
+								prop->tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
+								prop->label = NULL; // not yet known
+								prop->type_urid = 0; // not yet known
+								prop->minimum = 0.f; // not yet known
+								prop->maximum = 1.f; // not yet known
+								prop->unit = NULL; // not yet known
+
+								mod->dynamic_properties = eina_list_sorted_insert(mod->dynamic_properties, _urid_cmp, prop);
+
+								// append property to corresponding group
+								if(group)
+									group->children = eina_list_append(group->children, prop);
+
+								// append property to UI
+								if(parent) //TODO remove duplicate code
+								{
+									Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
+										ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
+										NULL, NULL);
+									int select_mode = ELM_OBJECT_SELECT_MODE_NONE;
+									elm_genlist_item_select_mode_set(elmnt, select_mode);
+									prop->std.elmnt = elmnt;
+								}
 							}
 						}
-					}
-					else if(atom_prop->key == ui->regs.patch.writable.urid)
-					{
-						property_t *prop = calloc(1, sizeof(property_t));
-						if(prop)
+						else if(atom_prop->key == ui->regs.patch.writable.urid)
 						{
-							prop->mod = mod;
-							prop->editable = 1;
-							prop->tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
-							prop->label = NULL; // not yet known
-							prop->type_urid = 0; // not yet known
-							prop->minimum = 0.f; // not yet known
-							prop->maximum = 1.f; // not yet known
+							if(subject->body != mod->subject)
+								continue; // ignore alien patch events
 
-							mod->dynamic_properties = eina_list_sorted_insert(mod->dynamic_properties, _urid_cmp, prop);
-
-							// append property to corresponding group
-							if(group)
-								group->children = eina_list_append(group->children, prop);
-
-							// append property to UI
-							if(parent) //TODO remove duplicate code
+							property_t *prop = calloc(1, sizeof(property_t));
+							if(prop)
 							{
-								Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
-									ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
-									NULL, NULL);
-								int select_mode = (prop->type_urid == ui->forge.String)
-									|| (prop->type_urid == ui->forge.URI)
-										? ELM_OBJECT_SELECT_MODE_DEFAULT
-										: ELM_OBJECT_SELECT_MODE_NONE;
-								elm_genlist_item_select_mode_set(elmnt, select_mode);
-								prop->std.elmnt = elmnt;
+								prop->mod = mod;
+								prop->editable = 1;
+								prop->tar_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
+								prop->label = NULL; // not yet known
+								prop->type_urid = 0; // not yet known
+								prop->minimum = 0.f; // not yet known
+								prop->maximum = 1.f; // not yet known
+								prop->unit = NULL; // not yet known
+
+								mod->dynamic_properties = eina_list_sorted_insert(mod->dynamic_properties, _urid_cmp, prop);
+
+								// append property to corresponding group
+								if(group)
+									group->children = eina_list_append(group->children, prop);
+
+								// append property to UI
+								if(parent) //TODO remove duplicate code
+								{
+									Elm_Object_Item *elmnt = elm_genlist_item_sorted_insert(ui->modlist,
+										ui->propitc, prop, parent, ELM_GENLIST_ITEM_NONE, _propitc_cmp,
+										NULL, NULL);
+									int select_mode = (prop->type_urid == ui->forge.String)
+										|| (prop->type_urid == ui->forge.URI)
+											? ELM_OBJECT_SELECT_MODE_DEFAULT
+											: ELM_OBJECT_SELECT_MODE_NONE;
+									elm_genlist_item_select_mode_set(elmnt, select_mode);
+									prop->std.elmnt = elmnt;
+								}
 							}
 						}
-					}
-					else if(atom_prop->key == ui->regs.rdfs.label.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
+						else if(atom_prop->key == ui->regs.rdfs.label.urid)
 						{
-							prop->label = strndup(LV2_ATOM_BODY_CONST(&atom_prop->value), atom_prop->value.size);
-							if(prop->std.elmnt)
-								elm_genlist_item_update(prop->std.elmnt);
-						}
-					}
-					else if(atom_prop->key == ui->regs.rdfs.range.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
+							const LV2_URID tar_urid = subject->body;
 
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
 
-						if(prop)
-						{
-							prop->type_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
-							if(prop->std.elmnt)
-								elm_genlist_item_update(prop->std.elmnt);
-						}
-					}
-					else if(atom_prop->key == ui->regs.core.minimum.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-						{
-							if(atom_prop->value.type == ui->forge.Int)
-								prop->minimum = ((const LV2_Atom_Int *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Long)
-								prop->minimum = ((const LV2_Atom_Long *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Float)
-								prop->minimum = ((const LV2_Atom_Float *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Double)
-								prop->minimum = ((const LV2_Atom_Double *)&atom_prop->value)->body;
-
-							if(prop->std.elmnt)
-								elm_genlist_item_update(prop->std.elmnt);
-						}
-					}
-					else if(atom_prop->key == ui->regs.core.maximum.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-						{
-							if(atom_prop->value.type == ui->forge.Int)
-								prop->maximum = ((const LV2_Atom_Int *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Long)
-								prop->maximum = ((const LV2_Atom_Long *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Float)
-								prop->maximum = ((const LV2_Atom_Float *)&atom_prop->value)->body;
-							else if(atom_prop->value.type == ui->forge.Double)
-								prop->maximum = ((const LV2_Atom_Double *)&atom_prop->value)->body;
-
-							if(prop->std.elmnt)
-								elm_genlist_item_update(prop->std.elmnt);
-						}
-					}
-					else if(atom_prop->key == ui->regs.core.scale_point.urid)
-					{
-						const LV2_URID tar_urid = subject->body;
-
-						property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
-
-						if(prop)
-						{
-							const LV2_Atom_Object *point_obj = (const LV2_Atom_Object *)&atom_prop->value;
-
-							const LV2_Atom_String *point_label = NULL;
-							const LV2_Atom *point_value = NULL;
-
-							LV2_Atom_Object_Query point_q[] = {
-								{ ui->regs.rdfs.label.urid, (const LV2_Atom **)&point_label },
-								{ ui->regs.rdf.value.urid, (const LV2_Atom **)&point_value },
-								LV2_ATOM_OBJECT_QUERY_END
-							};
-							lv2_atom_object_query(point_obj, point_q);
-
-							if(point_label && point_value)
+							if(prop)
 							{
-								point_t *p = calloc(1, sizeof(point_t));
-								p->label = strndup(LV2_ATOM_BODY_CONST(point_label), point_label->atom.size);
-								if(point_value->type == ui->forge.Int)
-								{
-									p->d = calloc(1, sizeof(double));
-									*p->d = ((const LV2_Atom_Int *)point_value)->body;
-								}
-								else if(point_value->type == ui->forge.Float)
-								{
-									p->d = calloc(1, sizeof(double));
-									*p->d = ((const LV2_Atom_Float *)point_value)->body;
-								}
-								else if(point_value->type == ui->forge.Long)
-								{
-									p->d = calloc(1, sizeof(double));
-									*p->d = ((const LV2_Atom_Long *)point_value)->body;
-								}
-								else if(point_value->type == ui->forge.Double)
-								{
-									p->d = calloc(1, sizeof(double));
-									*p->d = ((const LV2_Atom_Double *)point_value)->body;
-								}
-								//FIXME do other types
-								else if(point_value->type == ui->forge.String)
-								{
-									p->s = strndup(LV2_ATOM_BODY_CONST(point_value), point_value->size);
-								}
+								prop->label = strndup(LV2_ATOM_BODY_CONST(&atom_prop->value), atom_prop->value.size);
+								if(prop->std.elmnt)
+									elm_genlist_item_update(prop->std.elmnt);
+							}
+						}
+						else if(atom_prop->key == ui->regs.rdfs.range.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
 
-								prop->scale_points = eina_list_append(prop->scale_points, p);
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								prop->type_urid = ((const LV2_Atom_URID *)&atom_prop->value)->body;
+								if(prop->std.elmnt)
+									elm_genlist_item_update(prop->std.elmnt);
+							}
+						}
+						else if(atom_prop->key == ui->regs.core.minimum.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								if(atom_prop->value.type == ui->forge.Int)
+									prop->minimum = ((const LV2_Atom_Int *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Long)
+									prop->minimum = ((const LV2_Atom_Long *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Float)
+									prop->minimum = ((const LV2_Atom_Float *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Double)
+									prop->minimum = ((const LV2_Atom_Double *)&atom_prop->value)->body;
 
 								if(prop->std.elmnt)
 									elm_genlist_item_update(prop->std.elmnt);
 							}
 						}
+						else if(atom_prop->key == ui->regs.core.maximum.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								if(atom_prop->value.type == ui->forge.Int)
+									prop->maximum = ((const LV2_Atom_Int *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Long)
+									prop->maximum = ((const LV2_Atom_Long *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Float)
+									prop->maximum = ((const LV2_Atom_Float *)&atom_prop->value)->body;
+								else if(atom_prop->value.type == ui->forge.Double)
+									prop->maximum = ((const LV2_Atom_Double *)&atom_prop->value)->body;
+
+								if(prop->std.elmnt)
+									elm_genlist_item_update(prop->std.elmnt);
+							}
+						}
+						else if(atom_prop->key == ui->regs.units.unit.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								if(atom_prop->value.type == ui->forge.URID)
+								{
+									const char *uri = ui->driver->unmap->unmap(ui->driver->unmap->handle,
+										((const LV2_Atom_URID *)&atom_prop->value)->body);
+
+									if(uri)
+									{
+										LilvNode *unit = lilv_new_uri(ui->world, uri);
+										if(unit)
+										{
+											LilvNode *symbol = lilv_world_get(ui->world, unit, ui->regs.units.symbol.node, NULL);
+											if(symbol)
+											{
+												prop->unit = strdup(lilv_node_as_string(symbol));
+												lilv_node_free(symbol);
+											}
+
+											lilv_node_free(unit);
+										}
+									}
+								}
+
+								if(prop->std.elmnt)
+									elm_genlist_item_update(prop->std.elmnt);
+							}
+						}
+						else if(atom_prop->key == ui->regs.core.scale_point.urid)
+						{
+							const LV2_URID tar_urid = subject->body;
+
+							property_t *prop = eina_list_search_sorted(mod->dynamic_properties, _urid_find, &tar_urid);
+
+							if(prop)
+							{
+								const LV2_Atom_Object *point_obj = (const LV2_Atom_Object *)&atom_prop->value;
+
+								const LV2_Atom_String *point_label = NULL;
+								const LV2_Atom *point_value = NULL;
+
+								LV2_Atom_Object_Query point_q[] = {
+									{ ui->regs.rdfs.label.urid, (const LV2_Atom **)&point_label },
+									{ ui->regs.rdf.value.urid, (const LV2_Atom **)&point_value },
+									LV2_ATOM_OBJECT_QUERY_END
+								};
+								lv2_atom_object_query(point_obj, point_q);
+
+								if(point_label && point_value)
+								{
+									point_t *p = calloc(1, sizeof(point_t));
+									p->label = strndup(LV2_ATOM_BODY_CONST(point_label), point_label->atom.size);
+									if(point_value->type == ui->forge.Int)
+									{
+										p->d = calloc(1, sizeof(double));
+										*p->d = ((const LV2_Atom_Int *)point_value)->body;
+									}
+									else if(point_value->type == ui->forge.Float)
+									{
+										p->d = calloc(1, sizeof(double));
+										*p->d = ((const LV2_Atom_Float *)point_value)->body;
+									}
+									else if(point_value->type == ui->forge.Long)
+									{
+										p->d = calloc(1, sizeof(double));
+										*p->d = ((const LV2_Atom_Long *)point_value)->body;
+									}
+									else if(point_value->type == ui->forge.Double)
+									{
+										p->d = calloc(1, sizeof(double));
+										*p->d = ((const LV2_Atom_Double *)point_value)->body;
+									}
+									//FIXME do other types
+									else if(point_value->type == ui->forge.String)
+									{
+										p->s = strndup(LV2_ATOM_BODY_CONST(point_value), point_value->size);
+									}
+
+									prop->scale_points = eina_list_append(prop->scale_points, p);
+
+									if(prop->std.elmnt)
+										elm_genlist_item_update(prop->std.elmnt);
+								}
+							}
+						}
 					}
 				}
+				else
+					fprintf(stderr, "patch:Patch one of patch:subject, patch:add, patch:add missing\n");
 			}
-			else
-				fprintf(stderr, "patch:Patch one of patch:subject, patch:add, patch:add missing\n");
 		}
 	}
 	else
@@ -1664,7 +1785,7 @@ _x11_ui_client_resize(void *data, Evas *e, Evas_Object *obj, void *event_info)
 	int w, h;
 	evas_object_geometry_get(obj, NULL, NULL, &w, &h);
 
-	printf("_x11_ui_client_resize: %i %i\n", w, h);
+	//printf("_x11_ui_client_resize: %i %i\n", w, h);
 	mod->x11.client_resize_iface->ui_resize(mod->x11.handle, w, h);
 }
 
@@ -2130,6 +2251,16 @@ _sp_ui_mod_add(sp_ui_t *ui, const char *uri, u_id_t uid, LV2_Handle inst,
 
 				// does this port support patch:Message?
 				tar->patchable = lilv_port_supports_event(plug, port, ui->regs.patch.message.node);
+
+				tar->atom_type = 0;
+				if(lilv_port_supports_event(plug, port, ui->regs.port.midi.node))
+					tar->atom_type |= PORT_ATOM_TYPE_MIDI;
+				if(lilv_port_supports_event(plug, port, ui->regs.port.osc_event.node))
+					tar->atom_type |= PORT_ATOM_TYPE_OSC;
+				if(lilv_port_supports_event(plug, port, ui->regs.port.time_position.node))
+					tar->atom_type |= PORT_ATOM_TYPE_TIME;
+				if(lilv_port_supports_event(plug, port, ui->regs.patch.message.node))
+					tar->atom_type |= PORT_ATOM_TYPE_PATCH;
 			}
 
 			// get port unit
@@ -2178,6 +2309,7 @@ _sp_ui_mod_add(sp_ui_t *ui, const char *uri, u_id_t uid, LV2_Handle inst,
 			prop->type_urid = 0; // invalid type
 			prop->minimum = 0.f; // not yet known
 			prop->maximum = 1.f; // not yet known
+			prop->unit = NULL; // not yet known
 
 			// get type of patch:writable
 			LilvNode *type = lilv_world_get(ui->world, writable,
@@ -2210,6 +2342,78 @@ _sp_ui_mod_add(sp_ui_t *ui, const char *uri, u_id_t uid, LV2_Handle inst,
 				prop->maximum = lilv_node_as_float(maximum);
 
 				lilv_node_free(maximum);
+			}
+
+			// get units:unit
+			LilvNode *unit = lilv_world_get(ui->world, writable,
+				ui->regs.units.unit.node, NULL);
+			if(unit)
+			{
+				LilvNode *symbol = lilv_world_get(ui->world, unit, ui->regs.units.symbol.node, NULL);
+				if(symbol)
+				{
+					prop->unit = strdup(lilv_node_as_string(symbol));
+					lilv_node_free(symbol);
+				}
+
+				lilv_node_free(unit);
+			}
+			
+			LilvNodes *spoints = lilv_world_find_nodes(ui->world, writable,
+				ui->regs.core.scale_point.node, NULL);
+			if(spoints)
+			{
+				LILV_FOREACH(nodes, n, spoints)
+				{
+					const LilvNode *point = lilv_nodes_get(spoints, n);
+					LilvNode *point_label = lilv_world_get(ui->world, point,
+						ui->regs.rdfs.label.node, NULL);
+					LilvNode *point_value = lilv_world_get(ui->world, point,
+						ui->regs.rdf.value.node, NULL);
+
+					if(point_label && point_value)
+					{
+						point_t *p = calloc(1, sizeof(point_t));
+						p->label = strdup(lilv_node_as_string(point_label));
+						if(prop->type_urid == ui->forge.Int)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Float)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Long)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Double)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						//FIXME do other types
+						else if(prop->type_urid == ui->forge.String)
+						{
+							p->s = strdup(lilv_node_as_string(point_value));
+						}
+
+						prop->scale_points = eina_list_append(prop->scale_points, p);
+
+						if(prop->std.elmnt)
+							elm_genlist_item_update(prop->std.elmnt);
+					}
+
+					if(point_label)
+						lilv_node_free(point_label);
+					if(point_value)
+						lilv_node_free(point_value);
+				}
+					
+				lilv_nodes_free(spoints);
 			}
 
 			mod->static_properties = eina_list_sorted_insert(mod->static_properties, _urid_cmp, prop);
@@ -2248,6 +2452,7 @@ _sp_ui_mod_add(sp_ui_t *ui, const char *uri, u_id_t uid, LV2_Handle inst,
 			prop->type_urid = 0; // invalid type
 			prop->minimum = 0.f; // not yet known
 			prop->maximum = 1.f; // not yet known
+			prop->unit = NULL; // not yet known
 
 			// get type of patch:readable
 			LilvNode *type = lilv_world_get(ui->world, readable,
@@ -2280,6 +2485,79 @@ _sp_ui_mod_add(sp_ui_t *ui, const char *uri, u_id_t uid, LV2_Handle inst,
 				prop->maximum = lilv_node_as_float(maximum);
 
 				lilv_node_free(maximum);
+			}
+
+			// get units:unit
+			LilvNode *unit = lilv_world_get(ui->world, readable,
+				ui->regs.units.unit.node, NULL);
+			if(unit)
+			{
+				LilvNode *symbol = lilv_world_get(ui->world, unit, ui->regs.units.symbol.node, NULL);
+				if(symbol)
+				{
+					prop->unit = strdup(lilv_node_as_string(symbol));
+					lilv_node_free(symbol);
+				}
+
+				lilv_node_free(unit);
+			}
+			
+			LilvNodes *spoints = lilv_world_find_nodes(ui->world, readable,
+				ui->regs.core.scale_point.node, NULL);
+			if(spoints)
+			{
+				LILV_FOREACH(nodes, n, spoints)
+				{
+					const LilvNode *point = lilv_nodes_get(spoints, n);
+					LilvNode *point_label = lilv_world_get(ui->world, point,
+						ui->regs.rdfs.label.node, NULL);
+					LilvNode *point_value = lilv_world_get(ui->world, point,
+						ui->regs.rdf.value.node, NULL);
+
+					if(point_label && point_value)
+					{
+						point_t *p = calloc(1, sizeof(point_t));
+						p->label = strdup(lilv_node_as_string(point_label));
+
+						if(prop->type_urid == ui->forge.Int)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Float)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Long)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						else if(prop->type_urid == ui->forge.Double)
+						{
+							p->d = calloc(1, sizeof(double));
+							*p->d = lilv_node_as_float(point_value);
+						}
+						//FIXME do other types
+						else if(prop->type_urid == ui->forge.String)
+						{
+							p->s = strdup(lilv_node_as_string(point_value));
+						}
+
+						prop->scale_points = eina_list_append(prop->scale_points, p);
+
+						if(prop->std.elmnt)
+							elm_genlist_item_update(prop->std.elmnt);
+					}
+
+					if(point_label)
+						lilv_node_free(point_label);
+					if(point_value)
+						lilv_node_free(point_value);
+				}
+					
+				lilv_nodes_free(spoints);
 			}
 
 			mod->static_properties = eina_list_sorted_insert(mod->static_properties, _urid_cmp, prop);
@@ -2479,7 +2757,9 @@ _sp_ui_mod_del(sp_ui_t *ui, mod_t *mod)
 		EINA_LIST_FREE(mod->dynamic_properties, prop)
 		{
 			if(prop->label)
-				free(prop->label); // strndup
+				free(prop->label); // strdup
+			if(prop->unit)
+				free(prop->unit); // strdup
 			point_t *p;
 			EINA_LIST_FREE(prop->scale_points, p)
 			{
@@ -2794,6 +3074,11 @@ _patches_update(sp_ui_t *ui)
 			if(!port->selected)
 				continue; // ignore unselected ports
 
+			if(  (port->type == PORT_TYPE_ATOM)
+				&& (ui->matrix_atom_type != PORT_ATOM_TYPE_ALL)
+				&& !(port->atom_type & ui->matrix_atom_type))
+				continue;
+
 			count[port->direction][port->type] += 1;
 		}
 	}
@@ -2829,6 +3114,11 @@ _patches_update(sp_ui_t *ui)
 				continue; // ignore unselected ports
 			if(port->type != ui->matrix_type)
 				continue; // ignore unselected port types
+
+			if(  (port->type == PORT_TYPE_ATOM)
+				&& (ui->matrix_atom_type != PORT_ATOM_TYPE_ALL)
+				&& !(port->atom_type & ui->matrix_atom_type))
+				continue; // ignore unwanted atom types
 
 			LilvNode *name_node = lilv_port_get_name(mod->plug, port->tar);
 			const char *name_str = NULL;
@@ -3321,12 +3611,9 @@ _modlist_moved(void *data, Evas_Object *obj, void *event_info)
 	_patches_update(ui);
 }
 
-static void
-_mod_close_click(void *data, Evas_Object *lay, const char *emission, const char *source)
+static inline void
+_mod_del_widgets(mod_t *mod)
 {
-	mod_t *mod = data;
-	sp_ui_t *ui = mod->ui;
-
 	// close show ui
 	if(mod->show.ui && mod->show.descriptor)
 		_show_ui_hide(mod);
@@ -3336,6 +3623,14 @@ _mod_close_click(void *data, Evas_Object *lay, const char *emission, const char 
 	// close x11 ui
 	else if(mod->x11.ui && mod->x11.descriptor)
 		_x11_ui_hide(mod);
+	else if(mod->eo.embedded.itm)
+		elm_object_item_del(mod->eo.embedded.itm);
+}
+
+static inline void
+_mod_del_propagate(mod_t *mod)
+{
+	sp_ui_t *ui = mod->ui;
 
 	size_t size = sizeof(transmit_module_del_t);
 	transmit_module_del_t *trans = _sp_ui_to_app_request(ui, size);
@@ -3344,6 +3639,15 @@ _mod_close_click(void *data, Evas_Object *lay, const char *emission, const char 
 		_sp_transmit_module_del_fill(&ui->regs, &ui->forge, trans, size, mod->uid);
 		_sp_ui_to_app_advance(ui, size);
 	}
+}
+
+static void
+_mod_close_click(void *data, Evas_Object *lay, const char *emission, const char *source)
+{
+	mod_t *mod = data;
+
+	_mod_del_widgets(mod);
+	_mod_del_propagate(mod);
 }
 
 static inline Evas_Object *
@@ -3628,7 +3932,7 @@ _property_path_chosen(void *data, Evas_Object *obj, void *event_info)
 
 	//printf("_property_path_chosen: %s\n", path);
 
-	size_t strsize = strlen(path) + 1 + 7; // strlen("file://") == 7
+	size_t strsize = strlen(path) + 1;
 	size_t len = sizeof(transfer_patch_set_t) + lv2_atom_pad_size(strsize);
 
 	for(unsigned index=0; index<mod->num_ports; index++)
@@ -3650,7 +3954,7 @@ _property_path_chosen(void *data, Evas_Object *obj, void *event_info)
 				&ui->forge, trans, mod->uid, index, strsize,
 				mod->subject, prop->tar_urid, prop->type_urid);
 			if(atom)
-				sprintf(LV2_ATOM_BODY(atom), "file://%s", path);
+				strcpy(LV2_ATOM_BODY(atom), path);
 			_sp_ui_to_app_advance(ui, len);
 		}
 	}
@@ -3950,8 +4254,8 @@ _property_content_get(void *data, Evas_Object *obj, const char *part)
 					{
 						elm_fileselector_button_inwin_mode_set(child, EINA_FALSE);
 						elm_fileselector_button_window_title_set(child, "Select file");
-						elm_fileselector_is_save_set(child, EINA_FALSE);
-						elm_object_part_text_set(child, "default", "Select file");
+						elm_fileselector_is_save_set(child, EINA_TRUE);
+						elm_object_text_set(child, "Select file");
 						evas_object_smart_callback_add(child, "file,chosen",
 							_property_path_chosen, prop);
 						//TODO MIME type
@@ -3985,8 +4289,8 @@ _property_content_get(void *data, Evas_Object *obj, const char *part)
 					smart_slider_integer_set(child, integer);
 					smart_slider_format_set(child, integer ? "%.0f %s" : "%.4f %s");
 					smart_slider_disabled_set(child, !prop->editable);
-					//if(prop->unit) //FIXME
-					//	smart_slider_unit_set(child, port->unit);
+					if(prop->unit)
+						smart_slider_unit_set(child, prop->unit);
 					if(prop->editable)
 						evas_object_smart_callback_add(child, "changed", _property_sldr_changed, prop);
 					evas_object_smart_callback_add(child, "cat,in", _smart_mouse_in, ui);
@@ -4902,7 +5206,7 @@ _plugentry_changed(void *data, Evas_Object *obj, void *event_info)
 }
 
 static void
-_modlist_clear(sp_ui_t *ui, int clear_system_ports)
+_modlist_clear(sp_ui_t *ui, bool clear_system_ports, bool propagate)
 {
 	if(!ui || !ui->modlist)
 		return;
@@ -4921,7 +5225,9 @@ _modlist_clear(sp_ui_t *ui, int clear_system_ports)
 		if(!clear_system_ports && (mod->system.source || mod->system.sink) )
 			continue; // skip
 
-		_mod_close_click(mod, ui->modlist, NULL, NULL);
+		_mod_del_widgets(mod);
+		if(propagate)
+			_mod_del_propagate(mod);
 	}
 }
 
@@ -4944,7 +5250,7 @@ _menu_open(void *data, Evas_Object *obj, void *event_info)
 	if(ui && bundle_path)
 	{
 		int update_path = ui->driver->features & SP_UI_FEATURE_OPEN ? 1 : 0;
-		_modlist_clear(ui, 1); // clear system ports
+		_modlist_clear(ui, true, false); // clear system ports
 		sp_ui_bundle_load(ui, bundle_path, update_path);
 	}
 }
@@ -5070,17 +5376,394 @@ _patchbar_selected(void *data, Evas_Object *obj, void *event_info)
 	Elm_Object_Item *itm = event_info;
 
 	if(itm == ui->matrix_audio)
+	{
 		ui->matrix_type = PORT_TYPE_AUDIO;
-	else if(itm == ui->matrix_atom)
-		ui->matrix_type = PORT_TYPE_ATOM;
+	}
 	else if(itm == ui->matrix_control)
+	{
 		ui->matrix_type = PORT_TYPE_CONTROL;
+	}
 	else if(itm == ui->matrix_cv)
+	{
 		ui->matrix_type = PORT_TYPE_CV;
+	}
+	else if(itm == ui->matrix_atom)
+	{
+		ui->matrix_type = PORT_TYPE_ATOM;
+		ui->matrix_atom_type = PORT_ATOM_TYPE_ALL;
+	}
+
+	else if(itm == ui->matrix_atom_midi)
+	{
+		ui->matrix_type = PORT_TYPE_ATOM;
+		ui->matrix_atom_type = PORT_ATOM_TYPE_MIDI;
+	}
+	else if(itm == ui->matrix_atom_osc)
+	{
+		ui->matrix_type = PORT_TYPE_ATOM;
+		ui->matrix_atom_type = PORT_ATOM_TYPE_OSC;
+	}
+	else if(itm == ui->matrix_atom_time)
+	{
+		ui->matrix_type = PORT_TYPE_ATOM;
+		ui->matrix_atom_type = PORT_ATOM_TYPE_TIME;
+	}
+	else if(itm == ui->matrix_atom_patch)
+	{
+		ui->matrix_type = PORT_TYPE_ATOM;
+		ui->matrix_atom_type = PORT_ATOM_TYPE_PATCH;
+	}
+
 	else
+	{
 		return;
+	}
 	
 	_patches_update(ui);
+}
+
+Evas_Object *
+sp_ui_widget_get(sp_ui_t *ui)
+{
+	return ui->vbox;
+}
+
+static inline mod_t *
+_sp_ui_mod_get(sp_ui_t *ui, u_id_t uid)
+{
+	if(!ui || !ui->modlist)
+		return NULL;
+
+	for(Elm_Object_Item *itm = elm_genlist_first_item_get(ui->modlist);
+		itm != NULL;
+		itm = elm_genlist_item_next_get(itm))
+	{
+		mod_t *mod = elm_object_item_data_get(itm);
+		if(mod && (mod->uid == uid))
+			return mod;
+	}
+
+	return NULL;
+}
+
+static inline port_t *
+_sp_ui_port_get(sp_ui_t *ui, u_id_t uid, uint32_t index)
+{
+	mod_t *mod = _sp_ui_mod_get(ui, uid);
+	if(mod && (index < mod->num_ports) )
+		return &mod->ports[index];
+
+	return NULL;
+}
+
+static void
+_sp_ui_from_app_module_add(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_module_add_t *trans = (const transmit_module_add_t *)atom;
+
+	mod_t *mod = _sp_ui_mod_add(ui, trans->uri_str, trans->uid.body,
+		(void *)(uintptr_t)trans->inst.body, (data_access_t)(uintptr_t)trans->data.body);
+	if(!mod)
+		return; //TODO report
+
+	if(mod->system.source || mod->system.sink || !ui->sink_itm)
+	{
+		if(ui->modlist)
+		{
+			mod->std.itm = elm_genlist_item_append(ui->modlist, ui->moditc, mod,
+				NULL, ELM_GENLIST_ITEM_TREE, NULL, NULL);
+		}
+
+		if(mod->system.sink)
+			ui->sink_itm = mod->std.itm;
+	}
+	else // no sink and no source
+	{
+		if(ui->modlist)
+		{
+			mod->std.itm = elm_genlist_item_insert_before(ui->modlist, ui->moditc, mod,
+				NULL, ui->sink_itm, ELM_GENLIST_ITEM_TREE, NULL, NULL);
+		}
+	}
+
+	if(mod->eo.ui && ui->modgrid) // has EoUI
+	{
+		mod->eo.embedded.itm = elm_gengrid_item_append(ui->modgrid, ui->griditc, mod,
+			NULL, NULL);
+	}
+}
+
+static void
+_sp_ui_from_app_module_del(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_module_del_t *trans = (const transmit_module_del_t *)atom;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
+	if(!mod)
+		return;
+
+	if(mod->eo.full.win)
+	{
+		// remove full EoI if present
+		evas_object_del(mod->eo.full.win);
+		mod->eo.handle = NULL;
+		mod->eo.widget = NULL;
+		mod->eo.full.win = NULL;
+	}
+	else if(mod->eo.embedded.itm)
+	{
+		// remove EoUI grid item, if present
+		elm_object_item_del(mod->eo.embedded.itm);
+	}
+
+	// remove StdUI list item
+	if(mod->std.itm)
+	{
+		elm_genlist_item_expanded_set(mod->std.itm, EINA_FALSE);
+		elm_object_item_del(mod->std.itm);
+		mod->std.itm = NULL;
+	}
+
+	_patches_update(ui);
+}
+
+static void
+_sp_ui_from_app_module_preset_save(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_module_preset_save_t *trans = (const transmit_module_preset_save_t *)atom;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
+	if(!mod)
+		return;
+
+	// reload presets for this module
+	mod->presets = _preset_reload(ui->world, &ui->regs, mod->plug, mod->presets,
+		trans->label_str);
+}
+
+static void
+_sp_ui_from_app_module_selected(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_module_selected_t *trans = (const transmit_module_selected_t *)atom;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
+	if(!mod)
+		return;
+
+	if(mod->selected != trans->state.body)
+	{
+		mod->selected = trans->state.body;
+		if(mod->std.itm)
+			elm_genlist_item_update(mod->std.itm);
+
+		_patches_update(ui);
+	}
+}
+
+static void
+_sp_ui_from_app_port_connected(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_port_connected_t *trans = (const transmit_port_connected_t *)atom;
+	port_t *src = _sp_ui_port_get(ui, trans->src_uid.body, trans->src_port.body);
+	port_t *snk = _sp_ui_port_get(ui, trans->snk_uid.body, trans->snk_port.body);
+	if(!src || !snk)
+		return;
+
+	if(ui->matrix && (src->type == ui->matrix_type))
+	{
+		patcher_object_connected_set(ui->matrix, src, snk,
+			trans->state.body ? EINA_TRUE : EINA_FALSE,
+			trans->indirect.body);
+	}
+}
+
+static void
+_sp_ui_from_app_float_protocol(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transfer_float_t *trans = (const transfer_float_t *)atom;
+	uint32_t port_index = trans->transfer.port.body;
+	const float value = trans->value.body;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
+	if(!mod)
+		return;
+
+	_ui_port_event(mod, port_index, sizeof(float),
+		ui->regs.port.float_protocol.urid, &value);
+}
+
+static void
+_sp_ui_from_app_peak_protocol(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transfer_peak_t *trans = (const transfer_peak_t *)atom;
+	uint32_t port_index = trans->transfer.port.body;
+	const LV2UI_Peak_Data data = {
+		.period_start = trans->period_start.body,
+		.period_size = trans->period_size.body,
+		.peak = trans->peak.body
+	};
+	mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
+	if(!mod)
+		return;
+
+	_ui_port_event(mod, port_index, sizeof(LV2UI_Peak_Data),
+		ui->regs.port.peak_protocol.urid, &data);
+}
+
+static void
+_sp_ui_from_app_atom_transfer(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transfer_atom_t *trans = (const transfer_atom_t *)atom;
+	uint32_t port_index = trans->transfer.port.body;
+	const LV2_Atom *subatom = trans->atom;
+	uint32_t size = sizeof(LV2_Atom) + subatom->size;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
+	if(!mod)
+		return;
+
+	_ui_port_event(mod, port_index, size,
+		ui->regs.port.atom_transfer.urid, subatom);
+}
+
+static void
+_sp_ui_from_app_event_transfer(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transfer_atom_t *trans = (const transfer_atom_t *)atom;
+	uint32_t port_index = trans->transfer.port.body;
+	const LV2_Atom *subatom = trans->atom;
+	uint32_t size = sizeof(LV2_Atom) + subatom->size;
+	mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
+	if(!mod)
+		return;
+
+	_ui_port_event(mod, port_index, size,
+		ui->regs.port.event_transfer.urid, subatom);
+}
+
+static void
+_sp_ui_from_app_port_selected(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_port_selected_t *trans = (const transmit_port_selected_t *)atom;
+	port_t *port = _sp_ui_port_get(ui, trans->uid.body, trans->port.body);
+	if(!port)
+		return;
+
+	if(port->selected != trans->state.body)
+	{
+		port->selected = trans->state.body;
+
+		// FIXME update port itm
+		mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
+		if(mod && mod->std.itm)
+			elm_genlist_item_update(mod->std.itm);
+
+		_patches_update(ui);
+	}
+}
+
+static void
+_sp_ui_from_app_port_monitored(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_port_monitored_t *trans = (const transmit_port_monitored_t *)atom;
+	port_t *port = _sp_ui_port_get(ui, trans->uid.body, trans->port.body);
+	if(!port)
+		return;
+
+	if(port->std.monitored != trans->state.body)
+	{
+		port->std.monitored = trans->state.body;
+
+		// FIXME update port itm
+		mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
+		if(mod && mod->std.itm)
+			elm_genlist_item_update(mod->std.itm);
+	}
+}
+
+static void
+_sp_ui_from_app_module_list(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	if(ui->modlist)
+	{
+		ui->dirty = 1; // disable ui -> app communication
+		elm_genlist_clear(ui->modlist);
+		ui->dirty = 0; // enable ui -> app communication
+
+		_modlist_refresh(ui);
+	}
+}
+
+static void
+_sp_ui_from_app_bundle_load(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_bundle_load_t *trans = (const transmit_bundle_load_t *)atom;
+
+	if(ui->driver->opened)
+		ui->driver->opened(ui->data, trans->status.body);
+
+	if(ui->popup && evas_object_visible_get(ui->popup))
+	{
+		elm_popup_timeout_set(ui->popup, 1.f);
+		evas_object_show(ui->popup);
+	}
+}
+
+static void
+_sp_ui_from_app_bundle_save(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	atom = ASSUME_ALIGNED(atom);
+
+	const transmit_bundle_save_t *trans = (const transmit_bundle_save_t *)atom;
+
+	if(ui->driver->saved)
+		ui->driver->saved(ui->data, trans->status.body);
+}
+
+void
+sp_ui_from_app(sp_ui_t *ui, const LV2_Atom *atom)
+{
+	if(!ui || !atom)
+		return;
+
+	atom = ASSUME_ALIGNED(atom);
+	const transmit_t *transmit = (const transmit_t *)atom;
+
+	// check for atom object type
+	if(transmit->obj.atom.type != ui->forge.Object)
+		return;
+
+	// what we want to search for
+	const from_app_t cmp = {
+		.protocol = transmit->obj.body.otype,
+		.cb = NULL
+	};
+
+	// search for corresponding callback
+	const from_app_t *from_app = bsearch(&cmp, from_apps, FROM_APP_NUM, sizeof(from_app_t), _from_app_cmp);
+
+	// run callback if found
+	if(from_app)
+		from_app->cb(ui, atom);
 }
 
 sp_ui_t *
@@ -5635,6 +6318,7 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 								elm_toolbar_homogeneous_set(ui->patchbar, EINA_TRUE);
 								elm_toolbar_align_set(ui->patchbar, 0.f);
 								elm_toolbar_select_mode_set(ui->patchbar, ELM_OBJECT_SELECT_MODE_ALWAYS);
+								elm_toolbar_shrink_mode_set(ui->patchbar, ELM_TOOLBAR_SHRINK_SCROLL);
 								evas_object_smart_callback_add(ui->patchbar, "selected", _patchbar_selected, ui);
 								evas_object_size_hint_weight_set(ui->patchbar, EVAS_HINT_EXPAND, 0.f);
 								evas_object_size_hint_align_set(ui->patchbar, EVAS_HINT_FILL, 0.f);
@@ -5642,14 +6326,27 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 								elm_box_pack_end(ui->patchbox, ui->patchbar);
 
 								ui->matrix_audio = elm_toolbar_item_append(ui->patchbar,
-									SYNTHPOD_DATA_DIR"/audio.png", "AUDIO", NULL, NULL);
+									SYNTHPOD_DATA_DIR"/audio.png", "Audio", NULL, NULL);
 								elm_toolbar_item_selected_set(ui->matrix_audio, EINA_TRUE);
-								ui->matrix_atom = elm_toolbar_item_append(ui->patchbar,
-									SYNTHPOD_DATA_DIR"/atom.png", "ATOM", NULL, NULL);
 								ui->matrix_control = elm_toolbar_item_append(ui->patchbar,
-									SYNTHPOD_DATA_DIR"/control.png", "CONTROL", NULL, NULL);
+									SYNTHPOD_DATA_DIR"/control.png", "Control", NULL, NULL);
 								ui->matrix_cv = elm_toolbar_item_append(ui->patchbar,
 									SYNTHPOD_DATA_DIR"/cv.png", "CV", NULL, NULL);
+								ui->matrix_atom = elm_toolbar_item_append(ui->patchbar,
+									SYNTHPOD_DATA_DIR"/atom.png", "Atom", NULL, NULL);
+
+								Elm_Object_Item *sep = elm_toolbar_item_append(ui->patchbar,
+									NULL, NULL, NULL, NULL);
+								elm_toolbar_item_separator_set(sep, EINA_TRUE);
+
+								ui->matrix_atom_midi = elm_toolbar_item_append(ui->patchbar,
+									SYNTHPOD_DATA_DIR"/midi.png", "MIDI", NULL, NULL);
+								ui->matrix_atom_osc = elm_toolbar_item_append(ui->patchbar,
+									SYNTHPOD_DATA_DIR"/osc.png", "OSC", NULL, NULL);
+								ui->matrix_atom_time = elm_toolbar_item_append(ui->patchbar,
+									SYNTHPOD_DATA_DIR"/time.png", "Time", NULL, NULL);
+								ui->matrix_atom_patch = elm_toolbar_item_append(ui->patchbar,
+									SYNTHPOD_DATA_DIR"/patch.png", "Patch", NULL, NULL);
 							} // patchbar
 
 							ui->matrix = patcher_object_add(ui->patchbox);
@@ -5731,6 +6428,57 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 	// initialzie registry
 	sp_regs_init(&ui->regs, ui->world, ui->driver->map);
 
+	// fill from_app binary callback tree
+	{
+		unsigned ptr = 0;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.module_add.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_module_add;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.module_del.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_module_del;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.module_preset_save.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_module_preset_save;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.module_selected.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_module_selected;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.port_connected.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_port_connected;
+
+		from_apps[ptr].protocol = ui->regs.port.float_protocol.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_float_protocol;
+
+		from_apps[ptr].protocol = ui->regs.port.peak_protocol.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_peak_protocol;
+
+		from_apps[ptr].protocol = ui->regs.port.atom_transfer.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_atom_transfer;
+
+		from_apps[ptr].protocol = ui->regs.port.event_transfer.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_event_transfer;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.port_selected.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_port_selected;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.port_monitored.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_port_monitored;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.module_list.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_module_list;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.bundle_load.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_bundle_load;
+
+		from_apps[ptr].protocol = ui->regs.synthpod.bundle_save.urid;
+		from_apps[ptr++].cb = _sp_ui_from_app_bundle_save;
+
+		assert(ptr == FROM_APP_NUM);
+		// sort according to URID
+		qsort(from_apps, FROM_APP_NUM, sizeof(from_app_t), _from_app_cmp);
+	}
+
 	// walk plugin directories
 	ui->plugs = lilv_world_get_all_plugins(ui->world);
 
@@ -5738,277 +6486,6 @@ sp_ui_new(Evas_Object *win, const LilvWorld *world, sp_ui_driver_t *driver,
 	_pluglist_populate(ui, ""); // populate with everything
 
 	return ui;
-}
-
-Evas_Object *
-sp_ui_widget_get(sp_ui_t *ui)
-{
-	return ui->vbox;
-}
-
-static inline mod_t *
-_sp_ui_mod_get(sp_ui_t *ui, u_id_t uid)
-{
-	if(!ui || !ui->modlist)
-		return NULL;
-
-	for(Elm_Object_Item *itm = elm_genlist_first_item_get(ui->modlist);
-		itm != NULL;
-		itm = elm_genlist_item_next_get(itm))
-	{
-		mod_t *mod = elm_object_item_data_get(itm);
-		if(mod && (mod->uid == uid))
-			return mod;
-	}
-
-	return NULL;
-}
-
-static inline port_t *
-_sp_ui_port_get(sp_ui_t *ui, u_id_t uid, uint32_t index)
-{
-	mod_t *mod = _sp_ui_mod_get(ui, uid);
-	if(mod && (index < mod->num_ports) )
-		return &mod->ports[index];
-
-	return NULL;
-}
-
-void
-sp_ui_from_app(sp_ui_t *ui, const LV2_Atom *atom)
-{
-	if(!ui || !atom)
-		return;
-
-	atom = ASSUME_ALIGNED(atom);
-	const transmit_t *transmit = (const transmit_t *)atom;
-	LV2_URID protocol = transmit->obj.body.otype;
-
-	if(protocol == ui->regs.synthpod.module_add.urid)
-	{
-		const transmit_module_add_t *trans = (const transmit_module_add_t *)atom;
-
-		mod_t *mod = _sp_ui_mod_add(ui, trans->uri_str, trans->uid.body,
-			(void *)(uintptr_t)trans->inst.body, (data_access_t)(uintptr_t)trans->data.body);
-		if(!mod)
-			return; //TODO report
-
-		if(mod->system.source || mod->system.sink || !ui->sink_itm)
-		{
-			if(ui->modlist)
-			{
-				mod->std.itm = elm_genlist_item_append(ui->modlist, ui->moditc, mod,
-					NULL, ELM_GENLIST_ITEM_TREE, NULL, NULL);
-			}
-
-			if(mod->system.sink)
-				ui->sink_itm = mod->std.itm;
-		}
-		else // no sink and no source
-		{
-			if(ui->modlist)
-			{
-				mod->std.itm = elm_genlist_item_insert_before(ui->modlist, ui->moditc, mod,
-					NULL, ui->sink_itm, ELM_GENLIST_ITEM_TREE, NULL, NULL);
-			}
-		}
-
-		if(mod->eo.ui && ui->modgrid) // has EoUI
-		{
-			mod->eo.embedded.itm = elm_gengrid_item_append(ui->modgrid, ui->griditc, mod,
-				NULL, NULL);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.module_del.urid)
-	{
-		const transmit_module_del_t *trans = (const transmit_module_del_t *)atom;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
-		if(!mod)
-			return;
-
-		if(mod->eo.full.win)
-		{
-			// remove full EoI if present
-			evas_object_del(mod->eo.full.win);
-			mod->eo.handle = NULL;
-			mod->eo.widget = NULL;
-			mod->eo.full.win = NULL;
-		}
-		else if(mod->eo.embedded.itm)
-		{
-			// remove EoUI grid item, if present
-			elm_object_item_del(mod->eo.embedded.itm);
-		}
-
-		// remove StdUI list item
-		if(mod->std.itm)
-		{
-			elm_genlist_item_expanded_set(mod->std.itm, EINA_FALSE);
-			elm_object_item_del(mod->std.itm);
-			mod->std.itm = NULL;
-		}
-
-		_patches_update(ui);
-	}
-	else if(protocol == ui->regs.synthpod.module_preset_save.urid)
-	{
-		const transmit_module_preset_save_t *trans = (const transmit_module_preset_save_t *)atom;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
-		if(!mod)
-			return;
-
-		// reload presets for this module
-		mod->presets = _preset_reload(ui->world, &ui->regs, mod->plug, mod->presets,
-			trans->label_str);
-	}
-	else if(protocol == ui->regs.synthpod.module_selected.urid)
-	{
-		const transmit_module_selected_t *trans = (const transmit_module_selected_t *)atom;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
-		if(!mod)
-			return;
-
-		if(mod->selected != trans->state.body)
-		{
-			mod->selected = trans->state.body;
-			if(mod->std.itm)
-				elm_genlist_item_update(mod->std.itm);
-
-			_patches_update(ui);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.port_connected.urid)
-	{
-		const transmit_port_connected_t *trans = (const transmit_port_connected_t *)atom;
-		port_t *src = _sp_ui_port_get(ui, trans->src_uid.body, trans->src_port.body);
-		port_t *snk = _sp_ui_port_get(ui, trans->snk_uid.body, trans->snk_port.body);
-		if(!src || !snk)
-			return;
-
-		if(ui->matrix && (src->type == ui->matrix_type))
-		{
-			patcher_object_connected_set(ui->matrix, src, snk,
-				trans->state.body ? EINA_TRUE : EINA_FALSE,
-				trans->indirect.body);
-		}
-	}
-	else if(protocol == ui->regs.port.float_protocol.urid)
-	{
-		const transfer_float_t *trans = (const transfer_float_t *)atom;
-		uint32_t port_index = trans->transfer.port.body;
-		const float value = trans->value.body;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
-		if(!mod)
-			return;
-
-		_ui_port_event(mod, port_index, sizeof(float), protocol, &value);
-	}
-	else if(protocol == ui->regs.port.peak_protocol.urid)
-	{
-		const transfer_peak_t *trans = (const transfer_peak_t *)atom;
-		uint32_t port_index = trans->transfer.port.body;
-		const LV2UI_Peak_Data data = {
-			.period_start = trans->period_start.body,
-			.period_size = trans->period_size.body,
-			.peak = trans->peak.body
-		};
-		mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
-		if(!mod)
-			return;
-
-		_ui_port_event(mod, port_index, sizeof(LV2UI_Peak_Data), protocol, &data);
-	}
-	else if(protocol == ui->regs.port.atom_transfer.urid)
-	{
-		const transfer_atom_t *trans = (const transfer_atom_t *)atom;
-		uint32_t port_index = trans->transfer.port.body;
-		const LV2_Atom *subatom = trans->atom;
-		uint32_t size = sizeof(LV2_Atom) + subatom->size;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
-		if(!mod)
-			return;
-
-		_ui_port_event(mod, port_index, size, protocol, subatom);
-	}
-	else if(protocol == ui->regs.port.event_transfer.urid)
-	{
-		const transfer_atom_t *trans = (const transfer_atom_t *)atom;
-		uint32_t port_index = trans->transfer.port.body;
-		const LV2_Atom *subatom = trans->atom;
-		uint32_t size = sizeof(LV2_Atom) + subatom->size;
-		mod_t *mod = _sp_ui_mod_get(ui, trans->transfer.uid.body);
-		if(!mod)
-			return;
-
-		_ui_port_event(mod, port_index, size, protocol, subatom);
-	}
-	else if(protocol == ui->regs.synthpod.port_selected.urid)
-	{
-		const transmit_port_selected_t *trans = (const transmit_port_selected_t *)atom;
-		port_t *port = _sp_ui_port_get(ui, trans->uid.body, trans->port.body);
-		if(!port)
-			return;
-
-		if(port->selected != trans->state.body)
-		{
-			port->selected = trans->state.body;
-
-			// FIXME update port itm
-			mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
-			if(mod && mod->std.itm)
-				elm_genlist_item_update(mod->std.itm);
-
-			_patches_update(ui);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.port_monitored.urid)
-	{
-		const transmit_port_monitored_t *trans = (const transmit_port_monitored_t *)atom;
-		port_t *port = _sp_ui_port_get(ui, trans->uid.body, trans->port.body);
-		if(!port)
-			return;
-
-		if(port->std.monitored != trans->state.body)
-		{
-			port->std.monitored = trans->state.body;
-
-			// FIXME update port itm
-			mod_t *mod = _sp_ui_mod_get(ui, trans->uid.body);
-			if(mod && mod->std.itm)
-				elm_genlist_item_update(mod->std.itm);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.module_list.urid)
-	{
-		if(ui->modlist)
-		{
-			ui->dirty = 1; // disable ui -> app communication
-			elm_genlist_clear(ui->modlist);
-			ui->dirty = 0; // enable ui -> app communication
-
-			_modlist_refresh(ui);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.bundle_load.urid)
-	{
-		const transmit_bundle_load_t *trans = (const transmit_bundle_load_t *)atom;
-
-		if(ui->driver->opened)
-			ui->driver->opened(ui->data, trans->status.body);
-
-		if(ui->popup && evas_object_visible_get(ui->popup))
-		{
-			elm_popup_timeout_set(ui->popup, 1.f);
-			evas_object_show(ui->popup);
-		}
-	}
-	else if(protocol == ui->regs.synthpod.bundle_save.urid)
-	{
-		const transmit_bundle_save_t *trans = (const transmit_bundle_save_t *)atom;
-
-		if(ui->driver->saved)
-			ui->driver->saved(ui->data, trans->status.body);
-	}
 }
 
 void
@@ -6175,7 +6652,7 @@ sp_ui_bundle_new(sp_ui_t *ui)
 	if(!ui)
 		return;
 
-	_modlist_clear(ui, 0); // do not clear system ports
+	_modlist_clear(ui, false, true); // do not clear system ports
 }
 
 void

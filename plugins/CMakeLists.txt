@@ -4,6 +4,7 @@ include_directories(${PROJECT_SOURCE_DIR}/eo_ui.lv2)
 include_directories(${PROJECT_SOURCE_DIR}/zero_worker.lv2)
 include_directories(${PROJECT_SOURCE_DIR}/zero_writer.lv2)
 include_directories(${PROJECT_SOURCE_DIR}/osc.lv2)
+include_directories(${PROJECT_SOURCE_DIR}/varchunk)
 include_directories(${PROJECT_SOURCE_DIR}/lib) # synthpod_app.h, synthpod_ui.h
 
 if(WIN32)
@@ -27,7 +28,8 @@ add_library(synthpod.lv2 MODULE
 	synthpod_audioxfadestereo.c
 	synthpod_atom2control.c
 	synthpod_control2atom.c
-	synthpod_mixer.c)
+	synthpod_mixer.c
+	synthpod_monoatom.c)
 target_link_libraries(synthpod.lv2 synthpod.lib)
 set_target_properties(synthpod.lv2 PROPERTIES PREFIX "" OUTPUT_NAME "synthpod")
 install(TARGETS synthpod.lv2 DESTINATION ${SYNTHPOD_PLUGIN_DIR})

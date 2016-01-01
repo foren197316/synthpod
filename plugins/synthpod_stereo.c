@@ -18,7 +18,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <stdatomic.h>
 
 #include <synthpod_lv2.h>
 #include <synthpod_app.h>
@@ -35,8 +34,12 @@
 
 #include <zero_worker.h>
 #include <lv2_osc.h>
+#include <varchunk.h>
 
 #include <Eina.h>
+
+#define CHUNK_SIZE 0x10000
+#define MAX_MSGS 10 //FIXME limit to how many events?
 
 typedef struct _plughandle_t plughandle_t;
 
@@ -49,8 +52,7 @@ struct _plughandle_t {
 	LV2_Log_Log *log;
 	LV2_Options_Option *opts;
 
-	_Atomic int working;
-	_Atomic int dirty_in;
+	bool dirty_in;
 
 	struct {
 		struct {
@@ -74,8 +76,13 @@ struct _plughandle_t {
 		LV2_Atom_Forge event_out;
 		LV2_Atom_Forge com_in;
 		LV2_Atom_Forge notify;
-		LV2_Atom_Forge work;
 	} forge;
+
+	struct {
+		LV2_Atom_Forge_Ref event_out;
+		LV2_Atom_Forge_Ref com_in;
+		LV2_Atom_Forge_Ref notify;
+	} ref;
 
 	struct {
 		const LV2_Atom_Sequence *event_in;
@@ -105,25 +112,15 @@ struct _plughandle_t {
 		const LV2_Atom_Sequence *com_out;
 	} sink;
 
-	// non-rt worker-thread
-	struct {
-		LV2_Worker_Respond_Function respond;
-		LV2_Worker_Respond_Handle target;
-	} worker;
+	uint8_t buf [CHUNK_SIZE] _ATOM_ALIGNED;
 
-	// non-rt zero_worker-thread
-	struct {
-		Zero_Worker_Request_Function request;
-		Zero_Worker_Advance_Function advance;
-		Zero_Worker_Handle target;
-	} zero_worker;
-
-	struct {
-		uint8_t ui [CHUNK_SIZE] _ATOM_ALIGNED;
-		uint8_t worker [CHUNK_SIZE] _ATOM_ALIGNED;
-		uint8_t app [CHUNK_SIZE] _ATOM_ALIGNED;
-		uint8_t tmp [CHUNK_SIZE];
-	} buf;
+	bool advance_worker;
+	bool advance_ui;
+	bool trigger_worker;
+	varchunk_t *app_to_worker;
+	varchunk_t *app_from_worker;
+	varchunk_t *app_from_ui;
+	varchunk_t *app_from_app;
 };
 
 static int
@@ -192,7 +189,7 @@ _state_restore(LV2_Handle instance, LV2_State_Retrieve_Function retrieve,
 	plughandle_t *handle = instance;
 	sp_app_t *app = handle->app;
 
-	atomic_store_explicit(&handle->dirty_in, 1, memory_order_relaxed);
+	handle->dirty_in = true;
 
 	return sp_app_restore(app, retrieve, state, flags, features);
 }
@@ -207,20 +204,20 @@ static LV2_Worker_Status
 _work(LV2_Handle instance,
 	LV2_Worker_Respond_Function respond,
 	LV2_Worker_Respond_Handle target,
-	uint32_t size,
-	const void *body)
+	uint32_t _size,
+	const void *_body)
 {
 	plughandle_t *handle = instance;
 	
 	//printf("_work: %u\n", size);
 	
-	handle->worker.respond = respond;
-	handle->worker.target = target;
-
-	sp_worker_from_app(handle->app, size, body);
-
-	handle->worker.respond = NULL;
-	handle->worker.target = NULL;
+	size_t size;
+	const void *body;
+	while((body = varchunk_read_request(handle->app_to_worker, &size)))
+	{
+		sp_worker_from_app(handle->app, size, body);
+		varchunk_read_advance(handle->app_to_worker);
+	}
 
 	return LV2_WORKER_SUCCESS;
 }
@@ -229,10 +226,7 @@ _work(LV2_Handle instance,
 static LV2_Worker_Status
 _work_response(LV2_Handle instance, uint32_t size, const void *body)
 {
-	plughandle_t *handle = instance;
-
-	//printf("_work_response: %u\n", size);
-	sp_app_from_worker(handle->app, size, body);
+	//plughandle_t *handle = instance;
 
 	return LV2_WORKER_SUCCESS;
 }
@@ -241,9 +235,7 @@ _work_response(LV2_Handle instance, uint32_t size, const void *body)
 static LV2_Worker_Status
 _end_run(LV2_Handle instance)
 {
-	plughandle_t *handle = instance;
-
-	atomic_store_explicit(&handle->working, 0, memory_order_relaxed);
+	//plughandle_t *handle = instance;
 
 	return LV2_WORKER_SUCCESS;
 }
@@ -258,21 +250,20 @@ static const LV2_Worker_Interface work_iface = {
 static Zero_Worker_Status 
 _zero_work(LV2_Handle instance, Zero_Worker_Request_Function request,
 	Zero_Worker_Advance_Function advance, Zero_Worker_Handle target,
-	uint32_t size, const void *body)
+	uint32_t _size, const void *_body)
 {
 	plughandle_t *handle = instance;
 	
 	//printf("_zero_work: %u\n", size);
-	handle->zero_worker.request = request;
-	handle->zero_worker.advance = advance;
-	handle->zero_worker.target = target;
 
-	sp_worker_from_app(handle->app, size, body);
+	size_t size;
+	const void *body;
+	while((body = varchunk_read_request(handle->app_to_worker, &size)))
+	{
+		sp_worker_from_app(handle->app, size, body);
+		varchunk_read_advance(handle->app_to_worker);
+	}
 	
-	handle->zero_worker.request = NULL;
-	handle->zero_worker.advance = NULL;
-	handle->zero_worker.target = NULL;
-
 	return ZERO_WORKER_SUCCESS;
 }
 
@@ -281,10 +272,7 @@ static Zero_Worker_Status
 _zero_response(LV2_Handle instance, uint32_t size,
 	const void* body)
 {
-	plughandle_t *handle = instance;
-
-	//printf("_zero_response: %u\n", size);
-	sp_app_from_worker(handle->app, size, body);
+	//plughandle_t *handle = instance;
 
 	return ZERO_WORKER_SUCCESS;
 }
@@ -293,9 +281,7 @@ _zero_response(LV2_Handle instance, uint32_t size,
 static Zero_Worker_Status
 _zero_end(LV2_Handle instance)
 {
-	plughandle_t *handle = instance;
-	
-	atomic_store_explicit(&handle->working, 0, memory_order_relaxed);
+	//plughandle_t *handle = instance;
 
 	return ZERO_WORKER_SUCCESS;
 }
@@ -312,56 +298,43 @@ _to_ui_request(size_t size, void *data)
 {
 	plughandle_t *handle = data;
 
-	return handle->buf.ui;
+	return handle->buf;
 }
 static void
 _to_ui_advance(size_t size, void *data)
 {
 	plughandle_t *handle = data;
-	LV2_Atom_Forge *forge = &handle->forge.work;
+	LV2_Atom_Forge *forge = &handle->forge.notify;
+	LV2_Atom_Forge_Ref *ref = &handle->ref.notify;
 
 	//printf("_to_ui_advance: %zu\n", size);
 
 	if(forge->offset + size > forge->size)
 		return; // buffer overflow
 
-	lv2_atom_forge_frame_time(forge, 0);
-	lv2_atom_forge_raw(forge, handle->buf.ui, size);
-	lv2_atom_forge_pad(forge, size);
+	if(*ref)
+		*ref = lv2_atom_forge_frame_time(forge, 0);
+	if(*ref)
+		*ref = lv2_atom_forge_raw(forge, handle->buf, size);
+	if(*ref)
+		lv2_atom_forge_pad(forge, size);
 }
 
-// rt-thread
+// rt
 static void *
 _to_worker_request(size_t size, void *data)
 {
 	plughandle_t *handle = data;
-	
-	if(handle->zero_sched)
-	{
-		return handle->zero_sched->request(handle->zero_sched->handle, size);
-	}
 
-	return size <= CHUNK_SIZE
-		? handle->buf.worker
-		: NULL;
+	return varchunk_write_request(handle->app_to_worker, size);
 }
 static void
 _to_worker_advance(size_t size, void *data)
 {
 	plughandle_t *handle = data;
-	
-	//printf("_to_worker_advance: %zu\n", size);
-	
-	atomic_store_explicit(&handle->working, 1, memory_order_relaxed);
 
-	if(handle->zero_sched)
-	{
-		handle->zero_sched->advance(handle->zero_sched->handle, size); //TODO check
-		return;
-	}
-	
-	handle->schedule->schedule_work(handle->schedule->handle,
-		size, handle->buf.worker); //TODO check
+	varchunk_write_advance(handle->app_to_worker, size);
+	handle->trigger_worker = true;
 }
 
 // non-rt worker-thread
@@ -370,29 +343,21 @@ _to_app_request(size_t size, void *data)
 {
 	plughandle_t *handle = data;
 
-	// use zero worker if present
-	if(handle->zero_worker.request)
+	void *ptr;
+	do
 	{
-		return handle->zero_worker.request(handle->zero_worker.target, size);
+		ptr = varchunk_write_request(handle->app_from_worker, size);
 	}
+	while(!ptr); // wait until there is enough space
 
-	return size <= CHUNK_SIZE
-		? handle->buf.app
-		: NULL;
+	return ptr;
 }
 static void
 _to_app_advance(size_t size, void *data)
 {
-	plughandle_t *handle = data;
+	plughandle_t *handle = data;	
 
-	//printf("_to_app_advance: %zu\n", size);
-	if(handle->zero_worker.advance)
-	{
-		handle->zero_worker.advance(handle->zero_worker.target, size); //TODO check
-		return;
-	}
-
-	handle->worker.respond(handle->worker.target, size, handle->buf.app); //TODO check
+	varchunk_write_advance(handle->app_from_worker, size);
 }
 
 static LV2_Handle
@@ -404,9 +369,6 @@ instantiate(const LV2_Descriptor* descriptor, double rate,
 	plughandle_t *handle = calloc(1, sizeof(plughandle_t));
 	if(!handle)
 		return NULL;
-
-	atomic_init(&handle->working, 0);	
-	atomic_init(&handle->dirty_in, 0);	
 
 	handle->driver.sample_rate = rate;
 	handle->driver.seq_size = SEQ_SIZE;
@@ -507,6 +469,13 @@ instantiate(const LV2_Descriptor* descriptor, double rate,
 		//TODO handle more options
 	}
 
+	handle->advance_worker = true; //TODO reset in activate ?
+	handle->advance_ui = true; //TODO reset in activate ?
+	handle->app_to_worker = varchunk_new(CHUNK_SIZE);
+	handle->app_from_worker = varchunk_new(CHUNK_SIZE);
+	handle->app_from_ui = varchunk_new(CHUNK_SIZE);
+	handle->app_from_app = varchunk_new(CHUNK_SIZE);
+
 	handle->driver.to_ui_request = _to_ui_request;
 	handle->driver.to_ui_advance = _to_ui_advance;
 	handle->driver.to_worker_request = _to_worker_request;
@@ -602,8 +571,170 @@ activate(LV2_Handle instance)
 {
 	plughandle_t *handle = instance;
 
-	lv2_atom_forge_set_buffer(&handle->forge.work, handle->buf.tmp, CHUNK_SIZE);
 	sp_app_activate(handle->app);
+}
+
+static inline void
+_process_pre(plughandle_t *handle, uint32_t nsamples, bool bypassed)
+{
+	sp_app_t *app = handle->app;
+
+	// drain worker buffer
+	{
+		size_t size;
+		const void *body;
+		unsigned n = 0;
+		while((body = varchunk_read_request(handle->app_from_worker, &size))
+			&& (n++ < MAX_MSGS) )
+		{
+			bool advance = sp_app_from_worker(handle->app, size, body);
+			if(!advance)
+			{
+				//fprintf(stderr, "plugin worker is blocked\n");
+				break;
+			}
+			varchunk_read_advance(handle->app_from_worker);
+		}
+	}
+
+	// run app pre
+	if(!bypassed)
+		sp_app_run_pre(app, nsamples);
+
+	// drain events from UI ringbuffer
+	{
+		const LV2_Atom *atom;
+		size_t size;
+		unsigned n = 0;
+		while((atom = varchunk_read_request(handle->app_from_ui, &size))
+			&& (n++ < MAX_MSGS) )
+		{
+			handle->advance_ui = sp_app_from_ui(app, atom);
+			if(!handle->advance_ui)
+			{
+				//fprintf(stderr, "plugin ui indirect is blocked\n");
+				break;
+			}
+			varchunk_read_advance(handle->app_from_ui);
+		}
+	}
+
+	// drain events from feedback ringbuffer
+	{
+		const LV2_Atom *atom;
+		size_t size;
+		unsigned n = 0;
+		while((atom = varchunk_read_request(handle->app_from_app, &size))
+			&& (n++ < MAX_MSGS) )
+		{
+			handle->advance_ui = sp_app_from_ui(app, atom);
+			if(!handle->advance_ui)
+			{
+				//fprintf(stderr, "plugin feedback is blocked\n");
+				break;
+			}
+			varchunk_read_advance(handle->app_from_app);
+		}
+	}
+
+	//FIXME drain event from separate feedback ringbuffer
+
+	// handle events from UI
+	LV2_ATOM_SEQUENCE_FOREACH(handle->port.control, ev)
+	{
+		const LV2_Atom *atom = &ev->body;
+		const LV2_Atom_Object *obj = (const LV2_Atom_Object *)atom;
+
+		if(atom->type == handle->forge.notify.Object)
+		{
+			// copy com events to com buffer 
+			if(sp_app_com_event(handle->app, obj->body.id))
+			{
+				uint32_t size = obj->atom.size + sizeof(LV2_Atom);
+				if(handle->ref.com_in)
+					handle->ref.com_in = lv2_atom_forge_frame_time(&handle->forge.com_in, ev->time.frames);
+				if(handle->ref.com_in)
+					handle->ref.com_in = lv2_atom_forge_raw(&handle->forge.com_in, obj, size);
+				if(handle->ref.com_in)
+					lv2_atom_forge_pad(&handle->forge.com_in, size);
+			}
+
+			// try do process events directly
+			handle->advance_ui = sp_app_from_ui(app, atom);
+			if(!handle->advance_ui) // queue event in ringbuffer instead
+			{
+				//fprintf(stderr, "plugin ui direct is blocked\n");
+
+				void *ptr;
+				size_t size = lv2_atom_total_size(atom);
+				if((ptr = varchunk_write_request(handle->app_from_ui, size)))
+				{
+					memcpy(ptr, atom, size);
+					varchunk_write_advance(handle->app_from_ui, size);
+				}
+				else
+				{
+					//fprintf(stderr, "app_from_ui ringbuffer full\n");
+					//FIXME
+				}
+			}
+		}
+	}
+
+	// run app post
+	if(!bypassed)
+		sp_app_run_post(app, nsamples);
+
+	// write com events to feedback buffer
+	if(handle->sink.com_out)
+	{
+		LV2_ATOM_SEQUENCE_FOREACH(handle->sink.com_out, ev)
+		{
+			const LV2_Atom *atom = &ev->body;
+
+			void *ptr;
+			size_t size = lv2_atom_total_size(atom);
+			if((ptr = varchunk_write_request(handle->app_from_app, size)))
+			{
+				memcpy(ptr, atom, size);
+				varchunk_write_advance(handle->app_from_app, size);
+			}
+			else
+			{
+				//FIXME
+			}
+		}
+	}
+}
+		
+static inline void
+_process_post(plughandle_t *handle)
+{
+	if(handle->trigger_worker)
+	{
+		//fprintf(stderr, "work triggered\n");
+
+		if(handle->zero_sched)
+		{
+			int32_t *i;
+			if((i = handle->zero_sched->request(handle->zero_sched->handle, sizeof(int32_t))))
+			{
+				*i = 1;
+				handle->zero_sched->advance(handle->zero_sched->handle, sizeof(int32_t));
+			}
+			else
+			{
+				//FIXME
+			}
+		}
+		else // !handle->zero_sched
+		{
+			const int32_t i = 1;
+			handle->schedule->schedule_work(handle->schedule->handle, sizeof(int32_t), &i); //FIXME check
+		}
+
+		handle->trigger_worker = false;
+	}
 }
 
 static void
@@ -612,8 +743,9 @@ run(LV2_Handle instance, uint32_t nsamples)
 	plughandle_t *handle = instance;
 	sp_app_t *app = handle->app;
 
-	size_t sample_buf_size = sizeof(float) * nsamples;
+	const size_t sample_buf_size = sizeof(float) * nsamples;
 
+	// get input buffers
 	handle->source.event_in = NULL;
 	handle->source.audio_in[0] = NULL;
 	handle->source.audio_in[1] = NULL;
@@ -669,96 +801,7 @@ run(LV2_Handle instance, uint32_t nsamples)
 	if(handle->source.input[3])
 		*handle->source.input[3] = *handle->port.input[3];
 
-	if(atomic_load_explicit(&handle->dirty_in, memory_order_relaxed))
-	{
-		//printf("dirty\n");
-		//TODO refresh UI
-
-		atomic_store_explicit(&handle->dirty_in, 0, memory_order_relaxed);
-	}
-
-	struct {
-		LV2_Atom_Forge_Frame event_out;
-		LV2_Atom_Forge_Frame com_in;
-		LV2_Atom_Forge_Frame notify;
-	} frame;
-
-	// prepare forge(s) & sequence(s)
-	lv2_atom_forge_set_buffer(&handle->forge.event_out,
-		(uint8_t *)handle->port.event_out, handle->port.event_out->atom.size);
-	lv2_atom_forge_sequence_head(&handle->forge.event_out, &frame.event_out, 0);
-	
-	lv2_atom_forge_set_buffer(&handle->forge.com_in,
-		(uint8_t *)handle->source.com_in, SEQ_SIZE);
-	lv2_atom_forge_sequence_head(&handle->forge.com_in, &frame.com_in, 0);
-	
-	lv2_atom_forge_set_buffer(&handle->forge.notify,
-		(uint8_t *)handle->port.notify, handle->port.notify->atom.size);
-	lv2_atom_forge_sequence_head(&handle->forge.notify, &frame.notify, 0);
-
-	if(!atomic_load_explicit(&handle->working, memory_order_relaxed))
-	{
-		if(handle->forge.work.offset > 0)
-		{
-			// copy forge buffer
-			lv2_atom_forge_raw(&handle->forge.notify, handle->buf.tmp, handle->forge.work.offset);
-
-			// reset forge buffer
-			lv2_atom_forge_set_buffer(&handle->forge.work, handle->buf.tmp, CHUNK_SIZE);
-		}
-	}
-	
-	if(sp_app_paused(app))
-	{
-		memset(handle->port.audio_out[0], 0x0, nsamples*sizeof(float));
-		memset(handle->port.audio_out[1], 0x0, nsamples*sizeof(float));
-		
-		*handle->port.output[0] = 0.f;
-		*handle->port.output[1] = 0.f;
-		*handle->port.output[2] = 0.f;
-		*handle->port.output[3] = 0.f;
-	}
-	else
-	{
-		// run app pre
-		sp_app_run_pre(app, nsamples);
-
-		// handle events from UI
-		LV2_ATOM_SEQUENCE_FOREACH(handle->port.control, ev)
-		{
-			const LV2_Atom *atom = &ev->body;
-			const LV2_Atom_Object *obj = (const LV2_Atom_Object *)atom;
-
-			if(atom->type == handle->forge.notify.Object)
-			{
-				// copy com events to com buffer 
-				if(sp_app_com_event(handle->app, obj->body.id))
-				{
-					uint32_t size = obj->atom.size + sizeof(LV2_Atom);
-					lv2_atom_forge_frame_time(&handle->forge.com_in, ev->time.frames);
-					lv2_atom_forge_raw(&handle->forge.com_in, obj, size);
-					lv2_atom_forge_pad(&handle->forge.com_in, size);
-
-					sp_app_from_ui(app, atom);
-				}
-				else if (sp_app_transfer_event(handle->app, obj->body.id))
-				{
-					sp_app_from_ui(app, atom);
-				}
-			}
-		}
-
-		// finalize com buffer
-		lv2_atom_forge_pop(&handle->forge.com_in, &frame.com_in);
-		
-		// run app post
-		sp_app_run_post(app, nsamples);
-	}
-		
-	// end sequence(s)
-	lv2_atom_forge_pop(&handle->forge.event_out, &frame.event_out);
-	lv2_atom_forge_pop(&handle->forge.notify, &frame.notify);
-	
+	// get output buffers
 	const sp_app_system_sink_t *sinks = sp_app_get_system_sinks(app);
 
 	// fill output buffers
@@ -798,6 +841,85 @@ run(LV2_Handle instance, uint32_t nsamples)
 		}
 	}
 
+	if(handle->dirty_in)
+	{
+		//printf("dirty\n");
+		//TODO refresh UI
+		handle->dirty_in = false;
+	}
+
+	struct {
+		LV2_Atom_Forge_Frame event_out;
+		LV2_Atom_Forge_Frame com_in;
+		LV2_Atom_Forge_Frame notify;
+	} frame;
+
+	// prepare forge(s) & sequence(s)
+	lv2_atom_forge_set_buffer(&handle->forge.event_out,
+		(uint8_t *)handle->port.event_out, handle->port.event_out->atom.size);
+	handle->ref.event_out = lv2_atom_forge_sequence_head(&handle->forge.event_out, &frame.event_out, 0);
+	
+	lv2_atom_forge_set_buffer(&handle->forge.com_in,
+		(uint8_t *)handle->source.com_in, SEQ_SIZE);
+	handle->ref.com_in = lv2_atom_forge_sequence_head(&handle->forge.com_in, &frame.com_in, 0);
+	
+	lv2_atom_forge_set_buffer(&handle->forge.notify,
+		(uint8_t *)handle->port.notify, handle->port.notify->atom.size);
+	handle->ref.notify = lv2_atom_forge_sequence_head(&handle->forge.notify, &frame.notify, 0);
+
+	if(sp_app_bypassed(app))
+	{
+		//fprintf(stderr, "plugin app is bypassed\n");
+
+		memset(handle->port.audio_out[0], 0x0, nsamples*sizeof(float));
+		memset(handle->port.audio_out[1], 0x0, nsamples*sizeof(float));
+		
+		*handle->port.output[0] = 0.f;
+		*handle->port.output[1] = 0.f;
+		*handle->port.output[2] = 0.f;
+		*handle->port.output[3] = 0.f;
+
+		_process_pre(handle, nsamples, true);
+		_process_post(handle);
+
+		// end sequence(s)
+		if(handle->ref.event_out)
+			lv2_atom_forge_pop(&handle->forge.event_out, &frame.event_out);
+		else
+			lv2_atom_sequence_clear(handle->port.event_out);
+
+		if(handle->ref.com_in)
+			lv2_atom_forge_pop(&handle->forge.com_in, &frame.com_in);
+		else
+			lv2_atom_sequence_clear(handle->source.com_in);
+
+		if(handle->ref.notify)
+			lv2_atom_forge_pop(&handle->forge.notify, &frame.notify);
+		else
+			lv2_atom_sequence_clear(handle->port.notify);
+
+		return;
+	}
+
+	_process_pre(handle, nsamples, false);
+	_process_post(handle);
+
+	// end sequence(s)
+	if(handle->ref.event_out)
+		lv2_atom_forge_pop(&handle->forge.event_out, &frame.event_out);
+	else
+		lv2_atom_sequence_clear(handle->port.event_out);
+
+	if(handle->ref.com_in)
+		lv2_atom_forge_pop(&handle->forge.com_in, &frame.com_in);
+	else
+		lv2_atom_sequence_clear(handle->source.com_in);
+
+	if(handle->ref.notify)
+		lv2_atom_forge_pop(&handle->forge.notify, &frame.notify);
+	else
+		lv2_atom_sequence_clear(handle->port.notify);
+
 	if(handle->sink.event_out)
 		memcpy(handle->port.event_out, handle->sink.event_out, SEQ_SIZE);
 	else
@@ -817,17 +939,6 @@ run(LV2_Handle instance, uint32_t nsamples)
 	*handle->port.output[1] = handle->sink.output[1] ? *handle->sink.output[1] : 0.f;
 	*handle->port.output[2] = handle->sink.output[2] ? *handle->sink.output[2] : 0.f;
 	*handle->port.output[3] = handle->sink.output[3] ? *handle->sink.output[3] : 0.f;
-
-	if(handle->sink.com_out)
-	{
-		LV2_ATOM_SEQUENCE_FOREACH(handle->sink.com_out, ev)
-		{
-			const LV2_Atom *atom = &ev->body;
-
-			sp_app_from_ui(handle->app, atom);
-			//FIXME is this the right place?
-		}
-	}
 }
 
 static void
@@ -844,6 +955,12 @@ cleanup(LV2_Handle instance)
 	plughandle_t *handle = instance;
 
 	sp_app_free(handle->app);
+
+	varchunk_free(handle->app_to_worker);
+	varchunk_free(handle->app_from_worker);
+	varchunk_free(handle->app_from_ui);
+	varchunk_free(handle->app_from_app);
+
 	free(handle);
 
 	eina_shutdown();
